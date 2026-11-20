@@ -1,5 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { rateLimit } from 'express-rate-limit';
 import { query } from './db.js';
+import { accountLimits } from './config.js';
 
 export const hashToken = (token) => createHash('sha256').update(token).digest('hex');
 
@@ -66,3 +68,13 @@ export async function workerAuth(req, _res, next) {
     next(err);
   }
 }
+
+/** Per-API-key request rate, from the account's limits. Use after apiKeyAuth. */
+export const keyRateLimit = rateLimit({
+  windowMs: 60_000,
+  limit: (req) => accountLimits(req.account).requestsPerMinute,
+  keyGenerator: (req) => req.account.keyId,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  handler: (_req, _res, next) => next(new HttpError(429, 'rate_limited', 'Too many requests')),
+});

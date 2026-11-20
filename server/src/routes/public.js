@@ -1,10 +1,9 @@
 import { Router } from 'express';
 import express from 'express';
 import { unlink } from 'node:fs/promises';
-import { rateLimit } from 'express-rate-limit';
 import { accountLimits } from '../config.js';
 import { receiveMultipart, withUploadSlot } from '../upload-spool.js';
-import { apiKeyAuth, HttpError } from '../auth.js';
+import { apiKeyAuth, keyRateLimit, HttpError } from '../auth.js';
 import { inspectBundle } from '../bundle-inspect.js';
 import bunny from '../bunny.js';
 import { tx } from '../db.js';
@@ -17,16 +16,7 @@ import { withLiveStatus } from '../status.js';
 const router = Router();
 
 router.use(apiKeyAuth);
-router.use(
-  rateLimit({
-    windowMs: 60_000,
-    limit: (req) => accountLimits(req.account).requestsPerMinute,
-    keyGenerator: (req) => req.account.keyId,
-    standardHeaders: 'draft-8',
-    legacyHeaders: false,
-    handler: (_req, _res, next) => next(new HttpError(429, 'rate_limited', 'Too many requests')),
-  }),
-);
+router.use(keyRateLimit);
 
 const jsonBody = express.json({ limit: '2mb' });
 

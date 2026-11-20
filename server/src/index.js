@@ -7,6 +7,7 @@ import { pool } from './db.js';
 import { HttpError } from './auth.js';
 import publicRoutes from './routes/public.js';
 import workerRoutes from './routes/worker.js';
+import mcpRouter from './mcp.js';
 import { startSweeper } from './sweeper.js';
 import { rateLimit } from 'express-rate-limit';
 import { receiveUploadByToken } from './jobs/service.js';
@@ -55,6 +56,7 @@ export function createApp() {
     },
   );
   app.use('/v1', publicRoutes);
+  app.use('/mcp', mcpRouter);
   app.use('/worker', workerRoutes);
 
   app.use((_req, _res, next) => next(new HttpError(404, 'not_found', 'Not found')));
