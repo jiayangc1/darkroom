@@ -72,12 +72,21 @@ const ok = timingSafeEqual(Buffer.from(v1), Buffer.from(createHmac('sha256', sec
 Env: see `server/.env.example`. Runs migrations on boot. Deploy with `server/Dockerfile`
 (build context = repo root).
 
+Production: `https://darkroom.lsjc.dev` on Coolify (project "Darkroom", app `darkroom-server`,
+Postgres `darkroom-postgres`), files at `https://darkroom-files.b-cdn.net`. Notes:
+- Coolify's own health check is off (it needs curl/wget); the image has a Node `HEALTHCHECK`.
+- DNS is a Cloudflare CNAME to `a.lsjc.dev`, **DNS-only** — Cloudflare's proxy caps uploads at 100 MB.
+- Run admin commands with a Coolify one-off scheduled task in container `darkroom-server`.
+
 Admin (inside the container or locally with `DATABASE_URL`):
 
 ```bash
 npm run admin -w server -- account:create "Acme"        # prints id + webhook secret
 npm run admin -w server -- key:create <accountId> label # prints API key once
-npm run admin -w server -- worker:create mac-studio     # prints worker token once
+npm run admin -w server -- worker:create mac-studio     # prints worker token once (avoid on Coolify: its logs mask it)
+# Better: generate the token yourself and register only its hash
+T="drw_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"; printf %s "$T" | shasum -a 256
+npm run admin -w server -- worker:register mac-studio <sha256>
 npm run admin -w server -- account:limits <id> '{"maxActiveJobs":10}'
 ```
 
@@ -101,7 +110,13 @@ node worker/bin/darkroom-worker.js resume
 tail -f ~/Library/Logs/darkroom-worker/worker.log
 ```
 
-Memory: idle it is one small Node process. It only takes a job when `MIN_FREE_GB` (8) is available,
+Isolation: Chrome is forced through a filtering proxy (bundle server + allowlist only, checked
+before DNS); Node sockets are guarded; ffmpeg and the compositor run under `sandbox-exec` with no
+network and no access to your home folder outside the job. Chrome always comes from the worker's
+`CHROME_REMOTION_VERSION`, never from the bundle's Remotion version.
+
+Memory: idle it is one small Node process; under launchd it exits after every job so all render
+memory goes back to the system. It only takes a job when `MIN_FREE_GB` (8) is available,
 uses one Chrome tab per `GB_PER_TAB` (2) up to `MAX_TABS` (4), and hands the job back if macOS
 reports critical memory pressure. `PAUSE_SCHEDULE=09:00-18:00` blocks hours for model work.
 
