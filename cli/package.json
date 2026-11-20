@@ -1,0 +1,7 @@
+{
+  "name": "@darkroom/cli",
+  "private": true,
+  "type": "module",
+  "bin": { "darkroom": "bin/darkroom.js" },
+  "dependencies": {}
+}

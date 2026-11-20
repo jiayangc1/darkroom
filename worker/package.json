@@ -1,0 +1,13 @@
+{
+  "name": "@darkroom/worker",
+  "private": true,
+  "type": "module",
+  "bin": { "darkroom-worker": "bin/darkroom-worker.js" },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env bin/darkroom-worker.js start"
+  },
+  "dependencies": {
+    "ipaddr.js": "^2.5.0",
+    "tar-stream": "^3.2.2"
+  }
+}

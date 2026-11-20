@@ -6,6 +6,7 @@ import { pool } from './db.js';
 import { HttpError } from './auth.js';
 import publicRoutes from './routes/public.js';
 import workerRoutes from './routes/worker.js';
+import { startSweeper } from './sweeper.js';
 
 const STATUS_BY_CODE = {
   bundle_invalid: 400,
@@ -49,10 +50,12 @@ async function main() {
   await migrate();
   const app = createApp();
   const server = app.listen(config.port, () => console.log(`[darkroom] listening on :${config.port}`));
+  const stopSweeper = startSweeper();
   server.requestTimeout = 0; // large uploads; per-route limits apply instead
   server.headersTimeout = 60_000;
   const shutdown = () => {
     console.log('[darkroom] shutting down');
+    stopSweeper();
     server.close(() => pool.end().then(() => process.exit(0)));
     setTimeout(() => process.exit(1), 30_000).unref();
   };
