@@ -51,6 +51,14 @@ const commands = {
     await query('INSERT INTO workers (id, name, token_hash) VALUES ($1, $2, $3)', [id, name, hashToken(token)]);
     console.log(`worker id:    ${id}\nworker token: ${token}\n(shown once — put it in the worker's .env)`);
   },
+  // Register a token generated elsewhere, so the plaintext never appears in server logs:
+  //   T="drw_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"; printf %s "$T" | shasum -a 256
+  async 'worker:register'(name, tokenHash) {
+    if (!name || !/^[0-9a-f]{64}$/.test(tokenHash || '')) throw new Error('usage: worker:register <name> <sha256-hex of token>');
+    const id = randomUUID();
+    await query('INSERT INTO workers (id, name, token_hash) VALUES ($1, $2, $3)', [id, name, tokenHash]);
+    console.log(`worker id: ${id}`);
+  },
   async 'worker:list'() {
     const { rows } = await query('SELECT id, name, created_at, last_seen_at, revoked_at FROM workers ORDER BY created_at');
     console.table(rows);
