@@ -82,7 +82,7 @@ export async function reserveJob(c, account, fields, { status, bundlePath, bundl
   const limits = accountLimits(acct);
   if (limits.maxActiveJobs <= 0) throw new HttpError(403, 'not_approved', 'This account is on the waitlist and cannot render yet');
   if ((await repo.countActive(c, acct.id)) >= limits.maxActiveJobs) {
-    throw new HttpError(429, 'too_many_active_jobs', `At most ${limits.maxActiveJobs} jobs may be queued or rendering at once`);
+    throw new HttpError(429, 'too_many_active_jobs', `At most ${limits.maxActiveJobs} job${limits.maxActiveJobs === 1 ? '' : 's'} may be queued or rendering at once`);
   }
   const internal = acct.plan === 'internal';
   const hold = internal ? null : minCostMicro();
