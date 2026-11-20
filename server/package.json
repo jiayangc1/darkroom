@@ -1,0 +1,20 @@
+{
+  "name": "@darkroom/server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --env-file=.env --watch src/index.js",
+    "migrate": "node --env-file-if-exists=.env src/migrate.js",
+    "admin": "node --env-file-if-exists=.env src/admin.js"
+  },
+  "dependencies": {
+    "busboy": "^1.6.0",
+    "express": "^4.22.3",
+    "express-rate-limit": "^8.7.5",
+    "helmet": "^8.3.0",
+    "ipaddr.js": "^2.5.0",
+    "pg": "^8.23.1",
+    "tar-stream": "^3.2.2"
+  }
+}
