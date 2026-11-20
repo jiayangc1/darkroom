@@ -73,8 +73,12 @@ function serveWebApp(app) {
       },
     }),
   );
+  // Clerk production is bound to the canonical domain, so dashboard pages on an alias host
+  // (e.g. darkroom.lsjc.dev) redirect there. API, MCP and worker routes still answer on every host.
+  const canonicalHost = new URL(config.publicBaseUrl).host;
   app.get('*', (req, res, next) => {
     if (API_PREFIX.test(req.path)) return next();
+    if (req.get('host') && req.get('host') !== canonicalHost) return res.redirect(301, `${config.publicBaseUrl}${req.originalUrl}`);
     res.setHeader('Cache-Control', 'no-cache');
     res.sendFile(index);
   });
