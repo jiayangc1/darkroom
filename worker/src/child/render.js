@@ -51,6 +51,7 @@ const waitForMetaReply = () =>
 function classify(err) {
   const msg = String(err?.message || err);
   if (blocked.length) {
+    console.error(`[guard] blocked: ${blocked.join(' ')}`);
     return new RenderError(
       'network_blocked',
       `The video tried to load ${blocked.slice(0, 5).join(', ')}, which is not allowed. Bundle assets with staticFile(); ` +
