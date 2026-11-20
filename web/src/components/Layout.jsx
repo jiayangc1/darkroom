@@ -28,14 +28,17 @@ export default function Layout() {
   }, [refreshMe]);
 
   const nav = me?.isAdmin ? [...NAV, { to: '/app/admin', label: 'Admin', icon: Shield }] : NAV;
-  const waiting = me?.account.plan === 'waitlist' && location.pathname !== '/app/start';
+  const waiting = me?.account.plan === 'waitlist' && !me.isAdmin && location.pathname !== '/app/start';
 
   return (
     <div className="min-h-screen md:grid md:grid-cols-[232px_1fr]">
       <aside className="border-b border-seam md:sticky md:top-0 md:h-screen md:border-b-0 md:border-r">
         <div className="flex items-center justify-between px-5 py-4 md:block">
           <a href="/app" className="h-display text-3xl text-paper">Darkroom</a>
-          <div className="md:mt-3"><StatusLine /></div>
+          <div className="flex items-center gap-3 md:mt-3">
+            <StatusLine />
+            <span className="md:hidden"><UserButton /></span>
+          </div>
         </div>
         <nav className="flex gap-1 overflow-x-auto px-3 pb-3 md:flex-col md:pb-0">
           {nav.map(({ to, label, icon: Icon, end }) => (
