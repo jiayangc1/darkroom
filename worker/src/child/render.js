@@ -6,7 +6,8 @@ import { readFileSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { loopbackPorts, blocked } from './egress.js';
+import { loopbackPorts, proxyLoopbackPorts, blocked } from './egress.js';
+import { writeSandboxedBinaries } from './sandbox.js';
 import { startProxy } from './proxy.js';
 import { writeChromeWrapper } from './chrome-wrapper.js';
 import { descendants } from '../proctree.js';
@@ -71,15 +72,21 @@ async function main() {
   const require = createRequire(path.join(env.DARKROOM_RENDERER_DIR, 'package.json'));
   const renderer = await import(pathToFileURL(require.resolve('@remotion/renderer')).href);
 
-  const browserStatus = await renderer.ensureBrowser();
-  if (!browserStatus.path) throw new RenderError('worker_error', `Chrome is not installed for this Remotion version (${browserStatus.type})`, true);
+  // Chrome is chosen by the worker (one up-to-date build), never by the bundle's Remotion version.
+  const realChrome = env.DARKROOM_CHROME;
+  if (!realChrome) throw new RenderError('worker_error', 'No trusted Chrome configured', true);
+
+  // ffmpeg / compositor run inside a no-network macOS sandbox.
+  const realBinDir = path.dirname(require.resolve(`@remotion/compositor-${process.platform}-${process.arch}/package.json`));
+  const binariesDirectory = writeSandboxedBinaries({ realDir: realBinDir, jobDir, readDirs: [env.DARKROOM_RENDERER_DIR] });
 
   const servePort = await freePort();
   const debugPort = await freePort();
   const proxy = await startProxy();
-  for (const p of [servePort, debugPort, proxy.port]) loopbackPorts.add(p);
+  for (const p of [servePort, debugPort]) loopbackPorts.add(p); // Node: bundle server + DevTools
+  proxyLoopbackPorts.add(servePort); // page JS: bundle server only
 
-  const wrapper = writeChromeWrapper({ realChrome: browserStatus.path, proxyPort: proxy.port, debugPort, dir: jobDir });
+  const wrapper = writeChromeWrapper({ realChrome, proxyPort: proxy.port, debugPort, dir: jobDir });
   const chromiumOptions = { gl };
   const browser = await renderer.openBrowser('chrome', { browserExecutable: wrapper, chromiumOptions, logLevel: 'warn' });
 
@@ -93,6 +100,7 @@ async function main() {
       port: servePort,
       chromiumOptions,
       browserExecutable: wrapper,
+      binariesDirectory,
       timeoutInMilliseconds: 120_000,
       logLevel: 'warn',
     });
@@ -117,6 +125,7 @@ async function main() {
       port: servePort,
       chromiumOptions,
       browserExecutable: wrapper,
+      binariesDirectory,
       timeoutInMilliseconds: 120_000,
       logLevel: 'warn',
       onProgress: ({ progress, stitchStage }) => {

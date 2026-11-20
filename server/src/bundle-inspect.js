@@ -1,7 +1,21 @@
 import { createReadStream } from 'node:fs';
 import { createGunzip } from 'node:zlib';
 import { pipeline } from 'node:stream/promises';
+import { Transform } from 'node:stream';
 import tar from 'tar-stream';
+
+/** Abort once the uncompressed tar stream passes maxBytes (catches padding/zero-block bombs that tar entries never show). */
+function rawLimit(maxBytes) {
+  let n = 0;
+  return new Transform({
+    transform(chunk, _enc, cb) {
+      n += chunk.length;
+      if (n > maxBytes) return cb(new BundleError('bundle_too_large', 'Bundle unpacks too large'));
+      cb(null, chunk);
+    },
+  });
+}
+const rawCap = (limits) => Math.floor(limits.bundleMaxUnpackedBytes * 1.1) + limits.bundleMaxFiles * 1024 + 64 * 1024 * 1024;
 import config from './config.js';
 
 export class BundleError extends Error {
@@ -57,12 +71,10 @@ export async function inspectBundle(file, limits) {
       }
       const name = checkEntryName(header.name);
       if (name) topDirs.add(name.split('/')[0]);
-      if (header.type === 'file') {
-        fileCount++;
-        totalBytes += header.size || 0;
-        if (fileCount > limits.bundleMaxFiles) throw new BundleError('bundle_too_large', `Bundle has more than ${limits.bundleMaxFiles} files`);
-        if (totalBytes > limits.bundleMaxUnpackedBytes) throw new BundleError('bundle_too_large', `Bundle unpacks to more than ${limits.bundleMaxUnpackedBytes} bytes`);
-      }
+      fileCount++; // directories count too: a million empty dirs is still a million inodes
+      if (header.type === 'file') totalBytes += header.size || 0;
+      if (fileCount > limits.bundleMaxFiles) throw new BundleError('bundle_too_large', `Bundle has more than ${limits.bundleMaxFiles} entries`);
+      if (totalBytes > limits.bundleMaxUnpackedBytes) throw new BundleError('bundle_too_large', `Bundle unpacks to more than ${limits.bundleMaxUnpackedBytes} bytes`);
       const isIndex = header.type === 'file' && (name === 'index.html' || /^[^/]+\/index\.html$/.test(name));
       if (isIndex && header.size <= 1024 * 1024) {
         const chunks = [];
@@ -84,7 +96,7 @@ export async function inspectBundle(file, limits) {
   });
 
   try {
-    await pipeline(createReadStream(file), createGunzip(), extract);
+    await pipeline(createReadStream(file), createGunzip(), rawLimit(rawCap(limits)), extract);
   } catch (err) {
     if (err instanceof BundleError) throw err;
     throw new BundleError('bundle_invalid', `Not a valid .tar.gz archive: ${err.message}`);

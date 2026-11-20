@@ -25,8 +25,10 @@ const allowlist = (process.env.DARKROOM_ALLOWLIST || '')
   .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
 
-/** Ports on 127.0.0.1/::1 this render may use (its own bundle server, Chrome DevTools, the proxy). */
+/** Loopback ports Node may use (its own bundle server, Chrome DevTools). */
 export const loopbackPorts = new Set();
+/** Loopback ports page JS (via the proxy) may use: only the bundle server — never DevTools. */
+export const proxyLoopbackPorts = new Set();
 
 /** Hosts that were refused; reported back so the agent knows what to bundle. */
 export const blocked = [];
@@ -42,11 +44,20 @@ export function hostAllowlisted(host) {
 }
 
 /**
+ * Decide a hostname before resolving it, so a refused name never reaches DNS (no leaking data
+ * through lookups, no mDNS on the LAN). Only "localhost" and allowlisted names are resolved.
+ */
+export function mayResolve(host) {
+  const h = String(host || '').toLowerCase().replace(/\.$/, '');
+  return h === 'localhost' || hostAllowlisted(h);
+}
+
+/**
  * Decide one connection. `host` is the requested name (null for IP literals), `ip` the address
  * it resolved to, `port` the destination port.
  */
-export function isAllowed({ host, ip, port }) {
-  if (isLoopback(ip)) return loopbackPorts.has(Number(port));
+export function isAllowed({ host, ip, port }, ports = loopbackPorts) {
+  if (isLoopback(ip)) return ports.has(Number(port));
   if (!host || ipaddr.isValid(host)) return false; // non-loopback IP literals are never allowed
   return hostAllowlisted(host) && isPublicIp(ip);
 }

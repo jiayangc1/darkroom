@@ -28,6 +28,8 @@ const config = {
   pauseSchedule: env.PAUSE_SCHEDULE || '',
   heartbeatMs: num('HEARTBEAT_MS', 2000),
   pressureCooldownSec: num('PRESSURE_COOLDOWN_SEC', 300),
+  // Chrome for every render comes from this Remotion release (keep it current).
+  chromeRemotionVersion: env.CHROME_REMOTION_VERSION || '4.0.542',
   gl: env.CHROME_GL || (mac ? 'angle' : 'swangle'),
   version: '1.0.0',
 };

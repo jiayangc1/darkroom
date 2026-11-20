@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import config from './config.js';
@@ -32,7 +32,33 @@ async function withLock(lockDir, fn) {
 }
 
 /**
- * Ensure @remotion/renderer@version (and its Chrome) is installed in the per-version cache.
+ * The one Chrome every render uses, taken from the worker-chosen CHROME_REMOTION_VERSION — never
+ * from the bundle, so a customer can't pick an old Chrome with known holes. Downloaded here,
+ * outside the network-guarded render process. Returns the executable path.
+ */
+export async function trustedChrome() {
+  const dir = await ensureRenderer(config.chromeRemotionVersion);
+  const marker = path.join(dir, '.chrome-path');
+  if (existsSync(marker)) {
+    const p = (await readFile(marker, 'utf8')).trim();
+    if (existsSync(p)) return p;
+  }
+  return withLock(path.join(config.rendererCache, '.chrome.lock'), async () => {
+    log(`[renderer] installing Chrome from Remotion ${config.chromeRemotionVersion}`);
+    const { stdout } = await run(
+      process.execPath,
+      ['-e', "import('@remotion/renderer').then(async (r) => { const s = await r.ensureBrowser(); console.log(JSON.stringify(s)); })"],
+      { cwd: dir, timeout: 10 * 60_000, maxBuffer: 16 * 1024 * 1024 },
+    );
+    const status = JSON.parse(stdout.trim().split('\n').pop());
+    if (!status.path || !existsSync(status.path)) throw Object.assign(new Error(`Chrome install failed: ${stdout.slice(-300)}`), { code: 'worker_error' });
+    await writeFile(marker, status.path);
+    return status.path;
+  });
+}
+
+/**
+ * Ensure @remotion/renderer@version is installed in the per-version cache.
  * Only Remotion's own packages from npm are installed; install scripts are disabled.
  * Returns the directory whose node_modules contains @remotion/renderer.
  */
@@ -54,12 +80,6 @@ export async function ensureRenderer(version) {
         npmBin,
         ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--omit=dev', `@remotion/renderer@${version}`, `remotion@${version}`],
         { cwd: tmp, timeout: 10 * 60_000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, PATH: `${path.dirname(process.execPath)}:${process.env.PATH || ''}` } },
-      );
-      // Download Chrome now, outside the network-guarded render process.
-      await run(
-        process.execPath,
-        ['-e', "import('@remotion/renderer').then(async (r) => { const s = await r.ensureBrowser(); console.log(JSON.stringify(s)); })"],
-        { cwd: tmp, timeout: 10 * 60_000, maxBuffer: 16 * 1024 * 1024 },
       );
       await rm(dir, { recursive: true, force: true });
       await rename(tmp, dir);

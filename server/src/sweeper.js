@@ -16,7 +16,7 @@ async function expireLeases(c) {
                      ELSE '{"code":"worker_lost","message":"The render worker stopped responding too many times"}'::jsonb END,
         finished_at = CASE WHEN cancel_requested OR attempts >= $1 THEN now() ELSE finished_at END,
         worker_id = CASE WHEN cancel_requested OR attempts >= $1 THEN worker_id ELSE NULL END,
-        lease_expires_at = NULL, stage = NULL
+        lease_expires_at = NULL, stage = NULL, queued_at = now()
       WHERE status IN ('rendering', 'uploading_output') AND lease_expires_at < now()
       RETURNING id, status`,
     [config.maxAttempts],
@@ -75,14 +75,14 @@ async function webhooks(c) {
      ON CONFLICT (job_id) DO NOTHING`,
   );
   const { rows } = await c.query(
-    `SELECT d.job_id, d.event, d.attempts, j.*, a.webhook_secret
+    `SELECT j.*, d.job_id, d.event, d.attempts AS delivery_attempts, a.webhook_secret
        FROM webhook_deliveries d JOIN jobs j ON j.id = d.job_id JOIN accounts a ON a.id = j.account_id
       WHERE d.delivered_at IS NULL AND d.gave_up_at IS NULL AND d.next_at <= now()
       ORDER BY d.next_at LIMIT 20`,
   );
   await Promise.all(
     rows.map(async (r) => {
-      const attempt = r.attempts + 1;
+      const attempt = r.delivery_attempts + 1;
       try {
         await deliver(r.webhook_url, r.webhook_secret, { event: r.event, job: toPublic(r) });
         await c.query('UPDATE webhook_deliveries SET attempts = $2, delivered_at = now(), last_error = NULL WHERE job_id = $1', [r.job_id, attempt]);
@@ -101,13 +101,13 @@ async function webhooks(c) {
   );
 }
 
-async function pass() {
+async function pass(lockId, steps) {
   const c = await pool.connect();
   try {
-    const { rows } = await c.query('SELECT pg_try_advisory_lock(4242) AS ok');
+    const { rows } = await c.query('SELECT pg_try_advisory_lock($1) AS ok', [lockId]);
     if (!rows[0].ok) return;
     try {
-      for (const step of [expireLeases, deleteBundles, expireOutputs, webhooks]) {
+      for (const step of steps) {
         try {
           await step(c);
         } catch (err) {
@@ -115,23 +115,22 @@ async function pass() {
         }
       }
     } finally {
-      await c.query('SELECT pg_advisory_unlock(4242)');
+      await c.query('SELECT pg_advisory_unlock($1)', [lockId]);
     }
   } finally {
     c.release();
   }
 }
 
-/** Start the periodic sweeper; returns a stop function. */
-export function startSweeper(intervalMs = 15_000) {
+function loop(name, lockId, steps, intervalMs) {
   let running = false;
   const tick = async () => {
     if (running) return;
     running = true;
     try {
-      await pass();
+      await pass(lockId, steps);
     } catch (err) {
-      console.error('[sweeper] pass failed', err.message);
+      console.error(`[${name}] pass failed`, err.message);
     } finally {
       running = false;
     }
@@ -139,4 +138,13 @@ export function startSweeper(intervalMs = 15_000) {
   const timer = setInterval(tick, intervalMs);
   tick();
   return () => clearInterval(timer);
+}
+
+/** Start the periodic loops; returns a stop function. Webhooks run separately so a slow receiver can't delay lease expiry. */
+export function startSweeper(intervalMs = 15_000) {
+  const stops = [
+    loop('sweeper', 4242, [expireLeases, deleteBundles, expireOutputs], intervalMs),
+    loop('webhooks', 4243, [webhooks], intervalMs),
+  ];
+  return () => stops.forEach((s) => s());
 }

@@ -1,7 +1,7 @@
 import http from 'node:http';
 import dns from 'node:dns/promises';
 import net from 'node:net';
-import { isAllowed, recordBlocked } from './egress.js';
+import { isAllowed, mayResolve, proxyLoopbackPorts, recordBlocked } from './egress.js';
 
 const rawConnect = (opts) => (globalThis.__darkroomRawConnect ? globalThis.__darkroomRawConnect(opts) : net.connect(opts));
 
@@ -26,6 +26,7 @@ async function resolveAllowed(host, port) {
   const h = host.replace(/^\[|\]$/g, '');
   let addrs;
   if (net.isIP(h)) addrs = [{ address: h }];
+  else if (!mayResolve(h)) return null; // never look up names we'd refuse anyway
   else {
     try {
       addrs = await dns.lookup(h, { all: true });
@@ -35,7 +36,7 @@ async function resolveAllowed(host, port) {
   }
   if (!addrs.length) return null;
   const hostForCheck = net.isIP(h) ? null : h;
-  if (!addrs.every((a) => isAllowed({ host: hostForCheck, ip: a.address, port }))) return null;
+  if (!addrs.every((a) => isAllowed({ host: hostForCheck, ip: a.address, port }, proxyLoopbackPorts))) return null;
   return addrs.map((a) => a.address);
 }
 

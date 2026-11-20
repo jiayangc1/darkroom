@@ -189,6 +189,14 @@ router.post('/jobs/:id/complete', async (req, res, next) => {
     if (cur && cur.status === 'done' && cur.worker_id === req.worker.id) return res.json({ ok: true }); // idempotent
     const job = await ownedJob(req, ['uploading_output']);
     if (!job.output_path) throw new HttpError(409, 'no_output', 'Upload the output before completing');
+    if (job.cancel_requested) {
+      await tx((c) =>
+        repo.setStatus(c, job.id, ['uploading_output'], 'canceled', {
+          error: { code: 'canceled', message: 'Canceled by request' }, finished_at: { sql: 'now()' }, lease_expires_at: null,
+        }, { workerId: req.worker.id }),
+      );
+      return res.json({ ok: true, status: 'canceled' });
+    }
     const renderSeconds = Number(req.body?.renderSeconds);
     const v = job.video;
     const done = await tx((c) =>
@@ -209,6 +217,8 @@ router.post('/jobs/:id/complete', async (req, res, next) => {
     next(err);
   }
 });
+
+const MAX_PRESSURE_REQUEUES = 3;
 
 const ERROR_CODES = new Set([
   'bundle_invalid', 'bundle_too_large', 'version_unsupported', 'composition_not_found', 'limits_exceeded',
@@ -231,7 +241,7 @@ router.post('/jobs/:id/fail', async (req, res, next) => {
       patch = { error: { code: 'canceled', message: 'Canceled by request' }, finished_at: { sql: 'now()' }, lease_expires_at: null };
     } else if (retryable && job.attempts < config.maxAttempts) {
       to = 'queued';
-      patch = { error, worker_id: null, lease_expires_at: null, stage: null, progress: 0 };
+      patch = { error, worker_id: null, lease_expires_at: null, stage: null, progress: 0, queued_at: { sql: 'now()' } };
     } else {
       to = 'failed';
       patch = { error, finished_at: { sql: 'now()' }, lease_expires_at: null };
@@ -248,16 +258,24 @@ router.post('/jobs/:id/requeue', async (req, res, next) => {
   try {
     const job = await ownedJob(req, ['rendering', 'uploading_output']);
     const reason = String(req.body?.reason || 'requeued').slice(0, 200);
+    const pressure = reason === 'memory_pressure';
     const from = ['rendering', 'uploading_output'];
     const r = await tx(async (c) => {
       const row = job.cancel_requested
         ? await repo.setStatus(c, job.id, from, 'canceled', {
             error: { code: 'canceled', message: 'Canceled by request' }, finished_at: { sql: 'now()' }, lease_expires_at: null,
           }, { workerId: req.worker.id })
-        : await repo.setStatus(c, job.id, from, 'queued', {
-            worker_id: null, lease_expires_at: null, stage: null, progress: 0,
-            attempts: { sql: 'greatest(attempts - 1, 0)' },
-          }, { workerId: req.worker.id });
+        : pressure && job.requeues + 1 >= MAX_PRESSURE_REQUEUES
+          ? await repo.setStatus(c, job.id, from, 'failed', {
+              error: { code: 'limits_exceeded', message: 'The render used too much memory on the render machine, several times' },
+              finished_at: { sql: 'now()' }, lease_expires_at: null,
+            }, { workerId: req.worker.id })
+          : await repo.setStatus(c, job.id, from, 'queued', {
+              worker_id: null, lease_expires_at: null, stage: null, progress: 0,
+              attempts: { sql: 'greatest(attempts - 1, 0)' },
+              queued_at: { sql: 'now()' },
+              ...(pressure ? { requeues: { sql: 'requeues + 1' } } : {}),
+            }, { workerId: req.worker.id });
       if (row) await repo.addEvent(c, job.id, 'requeue_reason', { reason });
       return row;
     });

@@ -2,7 +2,7 @@
 // Node (Remotion's asset downloads, fetch, http, tls, ws) passes through isAllowed().
 import net from 'node:net';
 import dns from 'node:dns';
-import { isAllowed, recordBlocked } from './egress.js';
+import { isAllowed, mayResolve, recordBlocked } from './egress.js';
 
 const origConnect = net.Socket.prototype.connect;
 
@@ -18,6 +18,10 @@ function guardedLookup(port) {
     if (typeof options === 'function') {
       cb = options;
       options = {};
+    }
+    if (!mayResolve(hostname)) {
+      recordBlocked(hostname, port);
+      return cb(Object.assign(new Error(`Darkroom: network access to ${hostname} is blocked`), { code: 'ECONNREFUSED' }));
     }
     dns.lookup(hostname, { ...options, all: true }, (err, addrs) => {
       if (err) return cb(err);

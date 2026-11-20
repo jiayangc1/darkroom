@@ -43,13 +43,19 @@ export async function deliver(urlString, secret, payload) {
         },
       },
       (res) => {
-        res.resume();
+        clearTimeout(deadline);
+        res.destroy(); // the status is all we need; don't let a slow body hold us
         if (res.statusCode >= 200 && res.statusCode < 300) resolve();
         else reject(new Error(`HTTP ${res.statusCode}`));
       },
     );
+    // `timeout` is only an idle timeout; a receiver dribbling bytes could hold us for hours.
+    const deadline = setTimeout(() => req.destroy(new Error('deadline exceeded')), 15_000);
     req.on('timeout', () => req.destroy(new Error('timeout')));
-    req.on('error', reject);
+    req.on('error', (err) => {
+      clearTimeout(deadline);
+      reject(err);
+    });
     req.end(body);
   });
 }

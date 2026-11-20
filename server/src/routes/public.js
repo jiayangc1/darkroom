@@ -27,7 +27,16 @@ router.use(
   }),
 );
 
-/** Receive multipart: file part "bundle" spooled to disk, field "job" as JSON text. */
+const UPLOAD_IDLE_MS = 60_000;
+const UPLOAD_TOTAL_MS = 30 * 60_000;
+const MAX_UPLOADS_PER_ACCOUNT = 2;
+const inFlight = new Map(); // accountId -> uploads in progress
+
+/**
+ * Receive multipart: file part "bundle" spooled to disk, field "job" as JSON text.
+ * Rejects as soon as something is wrong (size cap, idle, deadline) and marks the request so the
+ * error handler closes the connection instead of reading the rest of the body.
+ */
 function receiveUpload(req, maxBytes) {
   return new Promise((resolve, reject) => {
     let bb;
@@ -42,15 +51,32 @@ function receiveUpload(req, maxBytes) {
     const spool = path.join(config.uploadDir, `${randomUUID()}.tar.gz`);
     let jobField = null;
     let fileSeen = false;
-    let fileDone = Promise.resolve();
-    let failed = null;
-    const fail = (err) => {
-      if (!failed) failed = err;
+    let fileDone = Promise.resolve(0);
+    let out = null;
+    let settled = false;
+
+    const cleanupSpool = () => {
+      // Unlink only after the write stream has closed, or the file may be created after we delete it.
+      if (out && !out.closed) out.once('close', () => unlink(spool).catch(() => {}));
+      else unlink(spool).catch(() => {});
     };
+    const abort = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      req.setTimeout(0);
+      req.unpipe(bb);
+      out?.destroy();
+      cleanupSpool();
+      req.darkroomCloseAfterResponse = true;
+      reject(err);
+    };
+    const deadline = setTimeout(() => abort(new HttpError(408, 'upload_timeout', 'Upload took too long')), UPLOAD_TOTAL_MS);
+    req.setTimeout(UPLOAD_IDLE_MS, () => abort(new HttpError(408, 'upload_timeout', 'Upload stalled')));
 
     bb.on('field', (name, value, info) => {
       if (name === 'job') {
-        if (info.valueTruncated) fail(new HttpError(413, 'job_too_large', '"job" field too large'));
+        if (info.valueTruncated) return abort(new HttpError(413, 'job_too_large', '"job" field too large'));
         jobField = value;
       }
     });
@@ -61,42 +87,35 @@ function receiveUpload(req, maxBytes) {
       }
       fileSeen = true;
       let bytes = 0;
-      const out = createWriteStream(spool, { mode: 0o600 });
+      out = createWriteStream(spool, { mode: 0o600 });
       fileDone = new Promise((res) => {
         stream.on('data', (c) => (bytes += c.length));
-        stream.on('limit', () => fail(new HttpError(413, 'bundle_too_large', `Bundle exceeds ${maxBytes} bytes`)));
+        stream.on('limit', () => abort(new HttpError(413, 'bundle_too_large', `Bundle exceeds ${maxBytes} bytes`)));
         out.on('finish', res);
         out.on('error', (e) => {
-          fail(e);
+          abort(e);
           res();
         });
         stream.on('error', (e) => {
-          fail(e);
-          out.destroy();
+          abort(e);
           res();
         });
         stream.pipe(out);
       }).then(() => bytes);
     });
-    bb.on('error', (e) => {
-      fail(new HttpError(400, 'bad_request', `Malformed upload: ${e.message}`));
-    });
+    bb.on('error', (e) => abort(new HttpError(400, 'bad_request', `Malformed upload: ${e.message}`)));
     bb.on('close', async () => {
       const bytes = await fileDone;
-      if (!failed && !fileSeen) failed = new HttpError(400, 'bad_request', 'Missing "bundle" file part');
-      if (!failed && jobField === null) failed = new HttpError(400, 'bad_request', 'Missing "job" field');
-      if (failed) {
-        await unlink(spool).catch(() => {});
-        return reject(failed);
-      }
+      if (settled) return;
+      if (!fileSeen) return abort(new HttpError(400, 'bad_request', 'Missing "bundle" file part'));
+      if (jobField === null) return abort(new HttpError(400, 'bad_request', 'Missing "job" field'));
+      settled = true;
+      clearTimeout(deadline);
+      req.setTimeout(0);
       resolve({ spool, bytes, jobField });
     });
     req.on('close', () => {
-      if (req.complete) return;
-      fail(new HttpError(400, 'aborted', 'Upload aborted'));
-      bb.destroy?.();
-      unlink(spool).catch(() => {});
-      reject(failed);
+      if (!req.complete) abort(new HttpError(400, 'aborted', 'Upload aborted'));
     });
     req.pipe(bb);
   });
@@ -153,6 +172,12 @@ async function parseJob(text) {
 
 router.post('/jobs', async (req, res, next) => {
   const limits = accountLimits(req.account);
+  const acct = req.account.id;
+  if ((inFlight.get(acct) || 0) >= MAX_UPLOADS_PER_ACCOUNT) {
+    req.darkroomCloseAfterResponse = true;
+    return next(new HttpError(429, 'too_many_uploads', `At most ${MAX_UPLOADS_PER_ACCOUNT} uploads at once per account`));
+  }
+  inFlight.set(acct, (inFlight.get(acct) || 0) + 1);
   let upload;
   try {
     await mkdir(config.uploadDir, { recursive: true });
@@ -196,6 +221,9 @@ router.post('/jobs', async (req, res, next) => {
   } catch (err) {
     next(err);
   } finally {
+    const n = (inFlight.get(acct) || 1) - 1;
+    if (n) inFlight.set(acct, n);
+    else inFlight.delete(acct);
     if (upload) await unlink(upload.spool).catch(() => {});
   }
 });

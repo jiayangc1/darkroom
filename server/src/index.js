@@ -1,4 +1,5 @@
 import express from 'express';
+import { rm } from 'node:fs/promises';
 import helmet from 'helmet';
 import config from './config.js';
 import { migrate } from './migrate.js';
@@ -36,18 +37,26 @@ export function createApp() {
 
   app.use((_req, _res, next) => next(new HttpError(404, 'not_found', 'Not found')));
 
-  app.use((err, _req, res, _next) => {
+  app.use((err, req, res, _next) => {
     const status = err.status || STATUS_BY_CODE[err.code] || (err.type === 'entity.too.large' ? 413 : 500);
     if (status >= 500) console.error('[error]', err);
     const code = status === 500 && !STATUS_BY_CODE[err.code] ? 'internal' : err.code || 'error';
     const message = status === 500 && code === 'internal' ? 'Internal error' : err.message;
-    if (!res.headersSent) res.status(status).json({ error: { code, message } });
+    if (res.headersSent) return;
+    if (req.darkroomCloseAfterResponse) {
+      // Don't keep reading a body we've already rejected (oversized / stalled upload).
+      res.setHeader('Connection', 'close');
+      res.on('finish', () => req.destroy());
+    }
+    res.status(status).json({ error: { code, message } });
   });
   return app;
 }
 
 async function main() {
   await migrate();
+  // Spool files left by a previous process (crash mid-upload) are never needed again.
+  await rm(config.uploadDir, { recursive: true, force: true }).catch(() => {});
   const app = createApp();
   const server = app.listen(config.port, () => console.log(`[darkroom] listening on :${config.port}`));
   const stopSweeper = startSweeper();

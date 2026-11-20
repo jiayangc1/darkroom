@@ -6,7 +6,7 @@ export const ACTIVE = ['uploading', 'queued', 'rendering', 'uploading_output'];
 const COLUMNS = new Set([
   'status', 'remotion_version', 'bundle_path', 'bundle_bytes', 'output_path', 'output_url', 'output_bytes',
   'progress', 'stage', 'attempts', 'worker_id', 'lease_expires_at', 'cancel_requested', 'error', 'video',
-  'render_seconds', 'video_seconds', 'started_at', 'finished_at', 'expires_at',
+  'render_seconds', 'video_seconds', 'started_at', 'finished_at', 'expires_at', 'queued_at', 'requeues',
 ]);
 const JSON_COLUMNS = new Set(['error', 'video']);
 
@@ -86,7 +86,7 @@ export async function claimNext(client, workerId, leaseSec) {
             started_at = coalesce(started_at, now()), attempts = attempts + 1,
             progress = 0, stage = 'claimed', error = NULL
       WHERE id = (SELECT id FROM jobs WHERE status = 'queued' AND NOT cancel_requested
-                   ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
+                   ORDER BY queued_at FOR UPDATE SKIP LOCKED LIMIT 1)
       RETURNING *`,
     [workerId, leaseSec],
   );

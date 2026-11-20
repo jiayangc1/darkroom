@@ -13,7 +13,7 @@ export function writeChromeWrapper({ realChrome, proxyPort, debugPort, dir }) {
 for a in "$@"; do
   shift
   case "$a" in
-    --no-proxy-server|--proxy-server=*|--proxy-bypass-list=*|--proxy-pac-url=*|--remote-debugging-port=*|--no-sandbox|--disable-web-security) ;;
+    --no-proxy-server|--proxy-server=*|--proxy-bypass-list=*|--proxy-pac-url=*|--remote-debugging-port=*|--remote-debugging-address=*|--remote-allow-origins*|--no-sandbox|--disable-web-security|--allow-file-access-from-files) ;;
     *) set -- "$@" "$a" ;;
   esac
 done

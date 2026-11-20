@@ -16,7 +16,8 @@ export const isNotOwner = (err) => err instanceof ApiError && err.status === 409
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const BACKOFF = [2000, 10_000, 30_000];
-const retryable = (err) => !(err instanceof ApiError) || err.status >= 500;
+const retryable = (err) => err?.name !== 'AbortError' && (!(err instanceof ApiError) || err.status >= 500);
+const withTimeout = (signal, ms) => (signal ? AbortSignal.any([signal, AbortSignal.timeout(ms)]) : AbortSignal.timeout(ms));
 
 /** JSON request with retries on network errors / 5xx. Returns parsed body, or null on 204. */
 async function call(method, p, body, { retries = BACKOFF.length, timeoutMs = 30_000 } = {}) {
@@ -48,18 +49,18 @@ export const fail = (id, code, message, retryable) => call('POST', `/worker/jobs
 export const requeue = (id, reason) => call('POST', `/worker/jobs/${id}/requeue`, { reason });
 
 /** Download the job's bundle archive to `dest`. */
-export async function downloadBundle(id, dest) {
+export async function downloadBundle(id, dest, signal) {
   for (let attempt = 0; ; attempt++) {
     try {
       const res = await fetch(`${config.serverUrl}/worker/jobs/${id}/bundle`, {
         headers: { Authorization: `Bearer ${config.workerToken}` },
-        signal: AbortSignal.timeout(30 * 60_000),
+        signal: withTimeout(signal, 30 * 60_000),
       });
       if (!res.ok) throw new ApiError(res.status, await res.json().catch(() => ({})));
       await pipeline(Readable.fromWeb(res.body), createWriteStream(dest, { mode: 0o600 }));
       return;
     } catch (err) {
-      if (attempt >= BACKOFF.length || !retryable(err)) throw err;
+      if (attempt >= BACKOFF.length || !retryable(err) || signal?.aborted) throw err;
       log(`[api] bundle download failed (${err.message}); retrying`);
       await sleep(BACKOFF[attempt]);
     }
@@ -67,7 +68,7 @@ export async function downloadBundle(id, dest) {
 }
 
 /** Upload the rendered file. */
-export async function uploadOutput(id, file) {
+export async function uploadOutput(id, file, signal) {
   const { size } = await stat(file);
   for (let attempt = 0; ; attempt++) {
     try {
@@ -76,13 +77,13 @@ export async function uploadOutput(id, file) {
         headers: { Authorization: `Bearer ${config.workerToken}`, 'Content-Type': 'video/mp4', 'Content-Length': String(size) },
         body: Readable.toWeb(createReadStream(file)),
         duplex: 'half',
-        signal: AbortSignal.timeout(30 * 60_000),
+        signal: withTimeout(signal, 30 * 60_000),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new ApiError(res.status, data);
       return;
     } catch (err) {
-      if (attempt >= BACKOFF.length || !retryable(err)) throw err;
+      if (attempt >= BACKOFF.length || !retryable(err) || signal?.aborted) throw err;
       log(`[api] output upload failed (${err.message}); retrying`);
       await sleep(BACKOFF[attempt]);
     }

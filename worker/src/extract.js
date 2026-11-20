@@ -3,7 +3,21 @@ import { mkdir, readdir } from 'node:fs/promises';
 import { createGunzip } from 'node:zlib';
 import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
+import { Transform } from 'node:stream';
 import tar from 'tar-stream';
+
+/** Abort once the uncompressed tar stream passes maxBytes (catches padding/zero-block bombs that tar entries never show). */
+function rawLimit(maxBytes) {
+  let n = 0;
+  return new Transform({
+    transform(chunk, _enc, cb) {
+      n += chunk.length;
+      if (n > maxBytes) return cb(new BundleError('bundle_too_large', 'Bundle unpacks too large'));
+      cb(null, chunk);
+    },
+  });
+}
+const rawCap = (limits) => Math.floor(limits.bundleMaxUnpackedBytes * 1.1) + limits.bundleMaxFiles * 1024 + 64 * 1024 * 1024;
 
 export class BundleError extends Error {
   constructor(code, message) {
@@ -45,14 +59,14 @@ export async function extract(archive, destDir, limits) {
       const name = checkEntryName(header.name);
       const target = path.resolve(root, name);
       if (target !== root && !target.startsWith(root + path.sep)) throw new BundleError('bundle_invalid', `Path escapes bundle: ${header.name}`);
+      files++; // directories count toward the entry limit too
+      if (files > limits.bundleMaxFiles) throw new BundleError('bundle_too_large', `Bundle has more than ${limits.bundleMaxFiles} entries`);
       if (header.type === 'directory') {
         await mkdir(target, { recursive: true, mode: 0o755 });
         stream.resume();
         return;
       }
-      files++;
       bytes += header.size || 0;
-      if (files > limits.bundleMaxFiles) throw new BundleError('bundle_too_large', `Bundle has more than ${limits.bundleMaxFiles} files`);
       if (bytes > limits.bundleMaxUnpackedBytes) throw new BundleError('bundle_too_large', 'Bundle unpacks too large');
       await mkdir(path.dirname(target), { recursive: true, mode: 0o755 });
       // 'wx': fail on duplicates instead of overwriting.
@@ -61,7 +75,7 @@ export async function extract(archive, destDir, limits) {
   });
 
   try {
-    await pipeline(createReadStream(archive), createGunzip(), ex);
+    await pipeline(createReadStream(archive), createGunzip(), rawLimit(rawCap(limits)), ex);
   } catch (err) {
     if (err instanceof BundleError) throw err;
     throw new BundleError('bundle_invalid', `Could not extract bundle: ${err.message}`);
