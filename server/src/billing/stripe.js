@@ -5,6 +5,8 @@ import { pool, tx } from '../db.js';
 import { HttpError } from '../auth.js';
 import { addEntry, lockAccount } from './ledger.js';
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 let client = null;
 const stripe = () => {
   if (!config.stripe.secretKey) throw new HttpError(503, 'billing_unavailable', 'Billing is not configured');
@@ -38,8 +40,9 @@ export async function createCheckout(account, pack) {
         product_data: { name: `Darkroom credits — $${pack}`, description: 'Prepaid render credit' },
       },
     }],
-    metadata: { accountId: account.id, pack: String(pack) },
-    payment_intent_data: { metadata: { accountId: account.id, pack: String(pack) } },
+    // The Stripe account is shared with other products; `app` marks Darkroom's own sessions.
+    metadata: { app: 'darkroom', accountId: account.id, pack: String(pack) },
+    payment_intent_data: { metadata: { app: 'darkroom', accountId: account.id, pack: String(pack) } },
     success_url: `${config.publicBaseUrl}/app/billing?paid=1`,
     cancel_url: `${config.publicBaseUrl}/app/billing`,
   });
@@ -48,14 +51,20 @@ export async function createCheckout(account, pack) {
 
 /** Credit a paid session exactly once (unique on the session id). Credit = pack price, not the taxed total. */
 async function creditSession(session) {
+  if (session.metadata?.app !== 'darkroom') return; // another product's checkout on the shared Stripe account
   if (session.payment_status !== 'paid') return;
   const accountId = session.metadata?.accountId;
   const pack = Number(session.metadata?.pack);
-  if (!accountId || !config.packs.includes(pack)) {
+  if (!UUID_RE.test(accountId || '') || !config.packs.includes(pack)) {
     console.error(`[stripe] session ${session.id} has no usable metadata`);
     return;
   }
   await tx(async (c) => {
+    const { rows } = await c.query('SELECT id FROM accounts WHERE id = $1', [accountId]);
+    if (!rows[0]) {
+      console.error(`[stripe] session ${session.id} names unknown account ${accountId}`);
+      return; // acknowledge: retrying can't fix it
+    }
     const acct = await lockAccount(c, accountId);
     const entry = await addEntry(c, {
       accountId, kind: 'purchase', amountMicro: pack * 1e6, stripeSessionId: session.id, note: `$${pack} pack`,
