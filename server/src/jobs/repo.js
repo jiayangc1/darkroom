@@ -1,4 +1,5 @@
 import { pool } from '../db.js';
+import { usd } from '../billing/pricing.js';
 
 export const TERMINAL = ['done', 'failed', 'canceled', 'expired'];
 export const ACTIVE = ['uploading', 'queued', 'rendering', 'uploading_output'];
@@ -7,6 +8,7 @@ const COLUMNS = new Set([
   'status', 'remotion_version', 'bundle_path', 'bundle_bytes', 'output_path', 'output_url', 'output_bytes',
   'progress', 'stage', 'attempts', 'worker_id', 'lease_expires_at', 'cancel_requested', 'error', 'video',
   'render_seconds', 'video_seconds', 'started_at', 'finished_at', 'expires_at', 'queued_at', 'requeues',
+  'hold_micro', 'cost_micro', 'upload_id',
 ]);
 const JSON_COLUMNS = new Set(['error', 'video']);
 
@@ -18,9 +20,13 @@ export async function addEvent(client, jobId, type, data = null) {
 
 export async function createJob(client, f) {
   const { rows } = await db(client).query(
-    `INSERT INTO jobs (id, account_id, status, composition_id, input_props, render_options, remotion_version, bundle_bytes, webhook_url)
-     VALUES ($1, $2, 'uploading', $3, $4, $5, $6, $7, $8) RETURNING *`,
-    [f.id, f.accountId, f.composition, f.inputProps, f.renderOptions, f.remotionVersion, f.bundleBytes, f.webhookUrl || null],
+    `INSERT INTO jobs (id, account_id, status, composition_id, input_props, render_options, remotion_version, bundle_bytes,
+                       webhook_url, bundle_path, hold_micro, upload_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+    [
+      f.id, f.accountId, f.status || 'uploading', f.composition, f.inputProps, f.renderOptions, f.remotionVersion,
+      f.bundleBytes, f.webhookUrl || null, f.bundlePath || null, f.holdMicro ?? null, f.uploadId || null,
+    ],
   );
   await addEvent(client, f.id, 'created');
   return rows[0];
@@ -127,5 +133,7 @@ export function toPublic(job) {
     startedAt: iso(job.started_at),
     finishedAt: iso(job.finished_at),
     expiresAt: iso(job.expires_at),
+    cost: usd(job.cost_micro),
+    estimatedCost: ACTIVE.includes(job.status) ? usd(job.hold_micro) : null,
   };
 }

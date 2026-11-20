@@ -11,6 +11,8 @@ import { workerAuth, HttpError } from '../auth.js';
 import { pool, tx } from '../db.js';
 import bunny from '../bunny.js';
 import * as repo from '../jobs/repo.js';
+import { lockAccount, availableMicro, addEntry } from '../billing/ledger.js';
+import { jobCostMicro, billedSeconds, usd } from '../billing/pricing.js';
 
 const router = Router();
 router.use(workerAuth);
@@ -154,8 +156,29 @@ router.post('/jobs/:id/video-meta', async (req, res, next) => {
       );
       return res.json({ ok: false, error: { code: 'limits_exceeded', message: error } });
     }
-    await repo.setStatus(null, job.id, ['rendering'], null, { video }, { workerId: req.worker.id });
-    res.json({ ok: true });
+    // Price is now exact: reserve it (or refuse the render) under the account lock.
+    const cost = jobCostMicro(video);
+    const r = await tx(async (c) => {
+      const acct = await lockAccount(c, job.account_id);
+      if (acct.plan === 'internal') {
+        await repo.setStatus(c, job.id, ['rendering'], null, { video, hold_micro: null, cost_micro: cost }, { workerId: req.worker.id });
+        return { ok: true };
+      }
+      const avail = await availableMicro(c, acct.id, { excludeJobId: job.id });
+      if (avail < cost) {
+        const err = {
+          code: 'insufficient_credits',
+          message: `This ${billedSeconds(video)} s video costs $${usd(cost)}; available balance is $${usd(Math.max(avail, 0))}`,
+        };
+        await repo.setStatus(c, job.id, ['rendering'], 'failed', {
+          video, error: err, finished_at: { sql: 'now()' }, lease_expires_at: null,
+        }, { workerId: req.worker.id });
+        return { ok: false, error: err };
+      }
+      await repo.setStatus(c, job.id, ['rendering'], null, { video, hold_micro: cost }, { workerId: req.worker.id });
+      return { ok: true };
+    });
+    res.json(r);
   } catch (err) {
     next(err);
   }
@@ -211,8 +234,10 @@ router.post('/jobs/:id/complete', async (req, res, next) => {
     }
     const renderSeconds = Number(req.body?.renderSeconds);
     const v = job.video;
-    const done = await tx((c) =>
-      repo.setStatus(c, job.id, ['uploading_output'], 'done', {
+    const done = await tx(async (c) => {
+      const acct = await lockAccount(c, job.account_id); // lock order: account, then job (same as video-meta)
+      const charge = acct.plan !== 'internal' && job.hold_micro !== null ? Number(job.hold_micro) : null;
+      const row = await repo.setStatus(c, job.id, ['uploading_output'], 'done', {
         output_url: bunny.cdnUrl(job.output_path),
         progress: 1,
         stage: null,
@@ -221,8 +246,13 @@ router.post('/jobs/:id/complete', async (req, res, next) => {
         video_seconds: v ? v.frames / v.fps : null,
         finished_at: { sql: 'now()' },
         expires_at: { sql: `now() + interval '${Number(config.retentionDays)} days'` },
-      }, { workerId: req.worker.id }),
-    );
+        ...(charge !== null ? { cost_micro: charge } : {}),
+      }, { workerId: req.worker.id });
+      if (row && charge !== null) {
+        await addEntry(c, { accountId: acct.id, kind: 'charge', amountMicro: -charge, jobId: job.id, note: job.composition_id });
+      }
+      return row;
+    });
     if (!done) throw notOwner();
     res.json({ ok: true });
   } catch (err) {

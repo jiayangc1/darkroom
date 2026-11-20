@@ -15,6 +15,10 @@ const STATUS_BY_CODE = {
   version_unsupported: 400,
   url_rejected: 400,
   storage_error: 502,
+  insufficient_credits: 402,
+  not_approved: 403,
+  forbidden: 403,
+  upload_invalid: 400,
 };
 
 export function createApp() {
