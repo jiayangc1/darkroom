@@ -1,9 +1,13 @@
 // Job operations shared by the REST API, the MCP server and the dashboard.
 import { randomUUID } from 'node:crypto';
+import { stat, unlink } from 'node:fs/promises';
 import config, { accountLimits } from '../config.js';
-import { HttpError } from '../auth.js';
+import { HttpError, newToken, hashToken } from '../auth.js';
 import { assertPublicUrl } from '../url-guard.js';
-import { tx } from '../db.js';
+import { pool, tx } from '../db.js';
+import bunny from '../bunny.js';
+import { inspectBundle } from '../bundle-inspect.js';
+import { receiveRaw, withUploadSlot } from '../upload-spool.js';
 import { lockAccount, availableMicro } from '../billing/ledger.js';
 import { minCostMicro, usd } from '../billing/pricing.js';
 import * as repo from './repo.js';
@@ -132,5 +136,100 @@ export async function cancelJob(accountId, jobId) {
       }
     }
     return (await repo.getJob(cur.id)) || cur; // already terminal (or raced)
+  });
+}
+
+// ---------- Upload links ----------
+
+const UPLOAD_TTL_MIN = 15;
+export const UPLOAD_TOKEN_RE = /^dru_[A-Za-z0-9_-]{43}$/;
+
+/** Issue a one-time upload link (15 min). The PUT needs only the token, never the API key. */
+export async function createUpload(account) {
+  const acct = await repo.accountRow(account.id);
+  if (!acct || acct.disabled_at) throw new HttpError(403, 'forbidden', 'This account is disabled');
+  if (acct.plan === 'waitlist') throw new HttpError(403, 'not_approved', 'This account is on the waitlist and cannot render yet');
+  const token = newToken('dru_');
+  const id = randomUUID();
+  const { rows } = await pool.query(
+    `INSERT INTO uploads (id, account_id, token_hash, status, expires_at)
+     VALUES ($1, $2, $3, 'pending', now() + $4 * interval '1 minute') RETURNING expires_at`,
+    [id, acct.id, hashToken(token), UPLOAD_TTL_MIN],
+  );
+  const uploadUrl = `${config.publicBaseUrl}/v1/uploads/${token}`;
+  return {
+    uploadId: id,
+    uploadUrl,
+    expiresAt: new Date(rows[0].expires_at).toISOString(),
+    maxBytes: accountLimits(acct).bundleMaxBytes,
+    curl: `curl -fsS -T bundle.tar.gz '${uploadUrl}'`,
+  };
+}
+
+/** Handle PUT /v1/uploads/:token: claim the token, spool, inspect, store in Bunny. */
+export async function receiveUploadByToken(req, token) {
+  const gone = () => new HttpError(404, 'not_found', 'Upload link not found, expired or already used');
+  if (!UPLOAD_TOKEN_RE.test(token)) throw gone();
+  const hash = hashToken(token);
+  const { rows } = await pool.query(
+    `UPDATE uploads SET status = 'receiving'
+      WHERE token_hash = $1 AND status = 'pending' AND expires_at > now() RETURNING *`,
+    [hash],
+  );
+  const up = rows[0];
+  if (!up) {
+    const { rows: cur } = await pool.query('SELECT status FROM uploads WHERE token_hash = $1 AND expires_at > now()', [hash]);
+    if (cur[0]?.status === 'receiving') throw new HttpError(409, 'upload_in_progress', 'This upload link is already receiving a file');
+    throw gone();
+  }
+  let spool;
+  try {
+    const acct = await repo.accountRow(up.account_id);
+    if (!acct || acct.disabled_at) throw new HttpError(403, 'forbidden', 'This account is disabled');
+    const limits = accountLimits(acct);
+    return await withUploadSlot(req, acct.id, async () => {
+      ({ spool } = await receiveRaw(req, limits.bundleMaxBytes));
+      const st = await stat(spool);
+      const info = await inspectBundle(spool, limits);
+      const bundlePath = `bundles/${acct.id}/upload-${up.id}.tar.gz`;
+      try {
+        await bunny.putFile(bundlePath, spool);
+      } catch (err) {
+        console.error('[upload] bunny put failed', err.message);
+        throw new HttpError(502, 'storage_error', 'Could not store the bundle; try again');
+      }
+      await pool.query(
+        `UPDATE uploads SET status = 'received', bundle_path = $2, bytes = $3, remotion_version = $4 WHERE id = $1`,
+        [up.id, bundlePath, st.size, info.remotionVersion],
+      );
+      return { uploadId: up.id, bytes: st.size, remotionVersion: info.remotionVersion };
+    });
+  } catch (err) {
+    // Let the agent retry with the same link while it is still valid.
+    await pool.query(`UPDATE uploads SET status = 'pending' WHERE id = $1 AND status = 'receiving'`, [up.id]).catch(() => {});
+    throw err;
+  } finally {
+    if (spool) await unlink(spool).catch(() => {});
+  }
+}
+
+/** Queue a job from a received upload. The upload is consumed in the same transaction. */
+export async function submitFromUpload(account, fields) {
+  if (!fields.uploadId) throw bad('"uploadId" is required (from create upload)');
+  return tx(async (c) => {
+    const { rows } = await c.query(
+      `SELECT * FROM uploads WHERE id = $1 AND account_id = $2 AND status = 'received' FOR UPDATE`,
+      [fields.uploadId, account.id],
+    );
+    const up = rows[0];
+    if (!up) throw new HttpError(400, 'upload_invalid', 'Upload not found, not finished, or already used');
+    if (fields.remotionVersion && fields.remotionVersion !== up.remotion_version) {
+      throw new HttpError(400, 'bundle_invalid', `remotionVersion ${fields.remotionVersion} does not match the bundle (${up.remotion_version})`);
+    }
+    const job = await reserveJob(c, account, fields, {
+      status: 'queued', bundlePath: up.bundle_path, bundleBytes: Number(up.bytes), remotionVersion: up.remotion_version, uploadId: up.id,
+    });
+    await c.query(`UPDATE uploads SET status = 'used' WHERE id = $1`, [up.id]);
+    return job;
   });
 }

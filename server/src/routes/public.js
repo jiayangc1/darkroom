@@ -1,17 +1,17 @@
 import { Router } from 'express';
-import Busboy from 'busboy';
-import { createWriteStream } from 'node:fs';
-import { mkdir, unlink } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
-import path from 'node:path';
+import express from 'express';
+import { unlink } from 'node:fs/promises';
 import { rateLimit } from 'express-rate-limit';
-import config, { accountLimits } from '../config.js';
+import { accountLimits } from '../config.js';
+import { receiveMultipart, withUploadSlot } from '../upload-spool.js';
 import { apiKeyAuth, HttpError } from '../auth.js';
 import { inspectBundle } from '../bundle-inspect.js';
 import bunny from '../bunny.js';
 import { tx } from '../db.js';
 import * as repo from '../jobs/repo.js';
-import { parseJob, reserveJob, getJobFor, listJobsFor, cancelJob } from '../jobs/service.js';
+import {
+  parseJob, parseJobObject, reserveJob, getJobFor, listJobsFor, cancelJob, createUpload, submitFromUpload,
+} from '../jobs/service.js';
 
 const router = Router();
 
@@ -27,148 +27,73 @@ router.use(
   }),
 );
 
-const UPLOAD_IDLE_MS = 60_000;
-const UPLOAD_TOTAL_MS = 30 * 60_000;
-const MAX_UPLOADS_PER_ACCOUNT = 2;
-const inFlight = new Map(); // accountId -> uploads in progress
+const jsonBody = express.json({ limit: '2mb' });
 
-/**
- * Receive multipart: file part "bundle" spooled to disk, field "job" as JSON text.
- * Rejects as soon as something is wrong (size cap, idle, deadline) and marks the request so the
- * error handler closes the connection instead of reading the rest of the body.
- */
-function receiveUpload(req, maxBytes) {
-  return new Promise((resolve, reject) => {
-    let bb;
-    try {
-      bb = Busboy({
-        headers: req.headers,
-        limits: { files: 1, fields: 5, fileSize: maxBytes + 1, fieldSize: 2 * 1024 * 1024 },
-      });
-    } catch {
-      return reject(new HttpError(400, 'bad_request', 'Expected multipart/form-data'));
-    }
-    const spool = path.join(config.uploadDir, `${randomUUID()}.tar.gz`);
-    let jobField = null;
-    let fileSeen = false;
-    let fileDone = Promise.resolve(0);
-    let out = null;
-    let settled = false;
+router.post('/jobs', (req, res, next) => {
+  if (req.is('application/json')) return jsonBody(req, res, (err) => (err ? next(err) : submitJson(req, res, next)));
+  return submitMultipart(req, res, next);
+});
 
-    const cleanupSpool = () => {
-      // Unlink only after the write stream has closed, or the file may be created after we delete it.
-      if (out && !out.closed) out.once('close', () => unlink(spool).catch(() => {}));
-      else unlink(spool).catch(() => {});
-    };
-    const abort = (err) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(deadline);
-      req.setTimeout(0);
-      req.unpipe(bb);
-      out?.destroy();
-      cleanupSpool();
-      req.darkroomCloseAfterResponse = true;
-      reject(err);
-    };
-    const deadline = setTimeout(() => abort(new HttpError(408, 'upload_timeout', 'Upload took too long')), UPLOAD_TOTAL_MS);
-    req.setTimeout(UPLOAD_IDLE_MS, () => abort(new HttpError(408, 'upload_timeout', 'Upload stalled')));
-
-    bb.on('field', (name, value, info) => {
-      if (name === 'job') {
-        if (info.valueTruncated) return abort(new HttpError(413, 'job_too_large', '"job" field too large'));
-        jobField = value;
-      }
-    });
-    bb.on('file', (name, stream) => {
-      if (name !== 'bundle' || fileSeen) {
-        stream.resume();
-        return;
-      }
-      fileSeen = true;
-      let bytes = 0;
-      out = createWriteStream(spool, { mode: 0o600 });
-      fileDone = new Promise((res) => {
-        stream.on('data', (c) => (bytes += c.length));
-        stream.on('limit', () => abort(new HttpError(413, 'bundle_too_large', `Bundle exceeds ${maxBytes} bytes`)));
-        out.on('finish', res);
-        out.on('error', (e) => {
-          abort(e);
-          res();
-        });
-        stream.on('error', (e) => {
-          abort(e);
-          res();
-        });
-        stream.pipe(out);
-      }).then(() => bytes);
-    });
-    bb.on('error', (e) => abort(new HttpError(400, 'bad_request', `Malformed upload: ${e.message}`)));
-    bb.on('close', async () => {
-      const bytes = await fileDone;
-      if (settled) return;
-      if (!fileSeen) return abort(new HttpError(400, 'bad_request', 'Missing "bundle" file part'));
-      if (jobField === null) return abort(new HttpError(400, 'bad_request', 'Missing "job" field'));
-      settled = true;
-      clearTimeout(deadline);
-      req.setTimeout(0);
-      resolve({ spool, bytes, jobField });
-    });
-    req.on('close', () => {
-      if (!req.complete) abort(new HttpError(400, 'aborted', 'Upload aborted'));
-    });
-    req.pipe(bb);
-  });
-}
-
-router.post('/jobs', async (req, res, next) => {
-  const limits = accountLimits(req.account);
-  const acct = req.account.id;
-  if ((inFlight.get(acct) || 0) >= MAX_UPLOADS_PER_ACCOUNT) {
-    req.darkroomCloseAfterResponse = true;
-    return next(new HttpError(429, 'too_many_uploads', `At most ${MAX_UPLOADS_PER_ACCOUNT} uploads at once per account`));
-  }
-  inFlight.set(acct, (inFlight.get(acct) || 0) + 1);
-  let upload;
+/** Submit from an upload link: JSON body with uploadId + job options. */
+async function submitJson(req, res, next) {
   try {
-    await mkdir(config.uploadDir, { recursive: true });
-    upload = await receiveUpload(req, limits.bundleMaxBytes);
-    const fields = await parseJob(upload.jobField);
-
-    const info = await inspectBundle(upload.spool, limits);
-    if (fields.remotionVersion && fields.remotionVersion !== info.remotionVersion) {
-      throw new HttpError(400, 'bundle_invalid', `remotionVersion ${fields.remotionVersion} does not match the bundle (${info.remotionVersion})`);
-    }
-
-    const { id } = await tx((c) =>
-      reserveJob(c, req.account, fields, { status: 'uploading', remotionVersion: info.remotionVersion, bundleBytes: upload.bytes }),
-    );
-    const bundlePath = `bundles/${req.account.id}/${id}.tar.gz`;
-    try {
-      await bunny.putFile(bundlePath, upload.spool);
-    } catch (err) {
-      console.error('[upload] bunny put failed', err.message);
-      await tx((c) =>
-        repo.setStatus(c, id, ['uploading'], 'failed', {
-          error: { code: 'storage_error', message: 'Could not store the bundle; try again' },
-          finished_at: { sql: 'now()' },
-        }),
-      );
-      throw new HttpError(502, 'storage_error', 'Could not store the bundle; try again');
-    }
-    const job = await tx(async (c) => {
-      // Record the path even if the job was canceled mid-upload, so the sweeper deletes the object.
-      await repo.setStatus(c, id, ['uploading', 'canceled'], null, { bundle_path: bundlePath });
-      return (await repo.setStatus(c, id, ['uploading'], 'queued')) || repo.getJob(id);
-    });
+    const fields = await parseJobObject(req.body);
+    const job = await submitFromUpload(req.account, fields);
     res.status(202).json(repo.toPublic(job));
   } catch (err) {
     next(err);
+  }
+}
+
+/** One-shot submit: multipart with the bundle file and the "job" field. */
+async function submitMultipart(req, res, next) {
+  const limits = accountLimits(req.account);
+  let upload;
+  try {
+    await withUploadSlot(req, req.account.id, async () => {
+      upload = await receiveMultipart(req, limits.bundleMaxBytes);
+      const fields = await parseJob(upload.jobField);
+
+      const info = await inspectBundle(upload.spool, limits);
+      if (fields.remotionVersion && fields.remotionVersion !== info.remotionVersion) {
+        throw new HttpError(400, 'bundle_invalid', `remotionVersion ${fields.remotionVersion} does not match the bundle (${info.remotionVersion})`);
+      }
+
+      const { id } = await tx((c) =>
+        reserveJob(c, req.account, fields, { status: 'uploading', remotionVersion: info.remotionVersion, bundleBytes: upload.bytes }),
+      );
+      const bundlePath = `bundles/${req.account.id}/${id}.tar.gz`;
+      try {
+        await bunny.putFile(bundlePath, upload.spool);
+      } catch (err) {
+        console.error('[upload] bunny put failed', err.message);
+        await tx((c) =>
+          repo.setStatus(c, id, ['uploading'], 'failed', {
+            error: { code: 'storage_error', message: 'Could not store the bundle; try again' },
+            finished_at: { sql: 'now()' },
+          }),
+        );
+        throw new HttpError(502, 'storage_error', 'Could not store the bundle; try again');
+      }
+      const job = await tx(async (c) => {
+        // Record the path even if the job was canceled mid-upload, so the sweeper deletes the object.
+        await repo.setStatus(c, id, ['uploading', 'canceled'], null, { bundle_path: bundlePath });
+        return (await repo.setStatus(c, id, ['uploading'], 'queued')) || repo.getJob(id);
+      });
+      res.status(202).json(repo.toPublic(job));
+    });
+  } catch (err) {
+    next(err);
   } finally {
-    const n = (inFlight.get(acct) || 1) - 1;
-    if (n) inFlight.set(acct, n);
-    else inFlight.delete(acct);
     if (upload) await unlink(upload.spool).catch(() => {});
+  }
+}
+
+router.post('/uploads', async (req, res, next) => {
+  try {
+    res.status(201).json(await createUpload(req.account));
+  } catch (err) {
+    next(err);
   }
 });
 

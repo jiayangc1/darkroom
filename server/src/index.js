@@ -8,6 +8,8 @@ import { HttpError } from './auth.js';
 import publicRoutes from './routes/public.js';
 import workerRoutes from './routes/worker.js';
 import { startSweeper } from './sweeper.js';
+import { rateLimit } from 'express-rate-limit';
+import { receiveUploadByToken } from './jobs/service.js';
 
 const STATUS_BY_CODE = {
   bundle_invalid: 400,
@@ -19,6 +21,7 @@ const STATUS_BY_CODE = {
   not_approved: 403,
   forbidden: 403,
   upload_invalid: 400,
+  upload_in_progress: 409,
 };
 
 export function createApp() {
@@ -36,6 +39,21 @@ export function createApp() {
     }
   });
 
+  // Upload links authenticate by their one-time token, so this sits before the API-key router.
+  app.put(
+    '/v1/uploads/:token',
+    rateLimit({
+      windowMs: 60_000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false,
+      handler: (_req, _res, next) => next(new HttpError(429, 'rate_limited', 'Too many requests')),
+    }),
+    async (req, res, next) => {
+      try {
+        res.json(await receiveUploadByToken(req, req.params.token));
+      } catch (err) {
+        next(err);
+      }
+    },
+  );
   app.use('/v1', publicRoutes);
   app.use('/worker', workerRoutes);
 

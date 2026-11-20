@@ -48,6 +48,22 @@ async function deleteBundles(c) {
   }
 }
 
+/** Upload links never submitted within an hour: delete the stored bundle and retire the link. */
+async function expireUploads(c) {
+  const { rows } = await c.query(
+    `SELECT id, bundle_path FROM uploads
+      WHERE status IN ('pending', 'receiving', 'received') AND created_at < now() - interval '1 hour' LIMIT 50`,
+  );
+  for (const r of rows) {
+    try {
+      if (r.bundle_path) await bunny.remove(r.bundle_path);
+      await c.query(`UPDATE uploads SET status = 'expired' WHERE id = $1`, [r.id]);
+    } catch (err) {
+      console.error(`[sweeper] upload cleanup failed for ${r.id}: ${err.message}`);
+    }
+  }
+}
+
 async function expireOutputs(c) {
   const { rows } = await c.query(
     `SELECT id, output_path FROM jobs WHERE status = 'done' AND expires_at < now() LIMIT 50`,
@@ -143,7 +159,7 @@ function loop(name, lockId, steps, intervalMs) {
 /** Start the periodic loops; returns a stop function. Webhooks run separately so a slow receiver can't delay lease expiry. */
 export function startSweeper(intervalMs = 15_000) {
   const stops = [
-    loop('sweeper', 4242, [expireLeases, deleteBundles, expireOutputs], intervalMs),
+    loop('sweeper', 4242, [expireLeases, deleteBundles, expireUploads, expireOutputs], intervalMs),
     loop('webhooks', 4243, [webhooks], intervalMs),
   ];
   return () => stops.forEach((s) => s());

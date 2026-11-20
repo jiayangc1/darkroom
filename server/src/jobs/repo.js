@@ -32,6 +32,11 @@ export async function createJob(client, f) {
   return rows[0];
 }
 
+export async function accountRow(id) {
+  const { rows } = await pool.query('SELECT * FROM accounts WHERE id = $1', [id]);
+  return rows[0] || null;
+}
+
 export async function getJob(id, accountId) {
   const { rows } = await pool.query(
     'SELECT * FROM jobs WHERE id = $1 AND ($2::uuid IS NULL OR account_id = $2)',
