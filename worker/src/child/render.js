@@ -9,6 +9,7 @@ import { pathToFileURL } from 'node:url';
 import { loopbackPorts, blocked } from './egress.js';
 import { startProxy } from './proxy.js';
 import { writeChromeWrapper } from './chrome-wrapper.js';
+import { descendants } from '../proctree.js';
 
 const env = process.env;
 const job = JSON.parse(readFileSync(env.DARKROOM_JOB_FILE, 'utf8'));
@@ -143,11 +144,14 @@ function failAndExit(err) {
 }
 // If the worker dies (crash, kill -9), take Chrome and everything else in our process group with us.
 process.on('disconnect', () => {
-  try {
-    process.kill(-process.pid, 'SIGKILL');
-  } catch {
-    process.exit(1);
+  for (const pid of descendants(process.pid)) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      /* gone */
+    }
   }
+  process.exit(1);
 });
 process.on('uncaughtException', failAndExit);
 process.on('unhandledRejection', failAndExit);

@@ -7,6 +7,7 @@ import * as api from './api.js';
 import { freeGb, pressureLevel } from './memory.js';
 import { state as pauseState, writeStatus } from './pause.js';
 import { runJob } from './run-job.js';
+import { killByCommand } from './proctree.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let stopping = false;
@@ -19,6 +20,8 @@ async function idle(ms) {
 
 export async function start() {
   if (!config.workerToken) throw new Error('WORKER_TOKEN is not set');
+  const orphans = killByCommand(config.rendererCache); // Chrome left running by a crashed worker
+  if (orphans) log(`[worker] killed ${orphans} leftover render processes`);
   await rm(config.workDir, { recursive: true, force: true }); // leftovers from a crash
   await mkdir(config.workDir, { recursive: true, mode: 0o700 });
   log(`[worker] started (server ${config.serverUrl}, max tabs ${config.maxTabs}, min free ${config.minFreeGb} GB, gl ${config.gl})`);

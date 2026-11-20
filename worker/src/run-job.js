@@ -9,6 +9,7 @@ import { extract } from './extract.js';
 import { ensureRenderer } from './renderers.js';
 import { pressureLevel } from './memory.js';
 import { state as pauseState, writeStatus } from './pause.js';
+import { killTree } from './proctree.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CHILD = path.join(here, 'child', 'render.js');
@@ -24,13 +25,8 @@ export async function runJob(job, { tabs }) {
   const result = { cooldown: false };
 
   const kill = () => {
-    if (child && child.exitCode === null) {
-      try {
-        process.kill(-child.pid, 'SIGKILL'); // whole process group: Chrome and helpers too
-      } catch {
-        child.kill('SIGKILL');
-      }
-    }
+    // Whole tree: Remotion starts Chrome in its own process group, so killing our group misses it.
+    if (child) killTree(child.pid);
   };
   const settle = async (fn, label) => {
     if (finished) return;
