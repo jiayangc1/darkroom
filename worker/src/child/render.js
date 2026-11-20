@@ -132,10 +132,17 @@ async function main() {
   }
 }
 
+let failing = false;
+function failAndExit(err) {
+  if (failing) return;
+  failing = true;
+  const e = classify(err);
+  send({ type: 'error', code: e.code, message: e.message, retryable: e.retryable });
+  setTimeout(() => process.exit(1), 100);
+}
+process.on('uncaughtException', failAndExit);
+process.on('unhandledRejection', failAndExit);
+
 main()
   .then(() => process.exit(0))
-  .catch((err) => {
-    const e = classify(err);
-    send({ type: 'error', code: e.code, message: e.message, retryable: e.retryable });
-    setTimeout(() => process.exit(1), 100);
-  });
+  .catch(failAndExit);

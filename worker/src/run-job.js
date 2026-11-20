@@ -69,7 +69,7 @@ export async function runJob(job, { tabs }) {
     const jobFile = path.join(dir, 'job.json');
     await writeFile(jobFile, JSON.stringify(job));
     child = spawn(process.execPath, ['--import', GUARD, CHILD], {
-      cwd: dir,
+      cwd: rendererDir, // Remotion finds its downloaded Chrome relative to cwd
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       env: {
