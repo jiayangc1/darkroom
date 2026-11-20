@@ -8,6 +8,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>__NODE__</string>
+    <string>--expose-gc</string>
     <string>--env-file-if-exists=__WORKER_DIR__/.env</string>
     <string>__WORKER_DIR__/bin/darkroom-worker.js</string>
     <string>start</string>
@@ -23,8 +24,9 @@
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <!-- The worker exits after every job to release memory; restart it right away. -->
   <key>ThrottleInterval</key>
-  <integer>30</integer>
+  <integer>1</integer>
   <!-- Standard, not Background: Background may deprioritize GPU work. -->
   <key>ProcessType</key>
   <string>Standard</string>

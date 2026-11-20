@@ -33,8 +33,15 @@ sed -e "s#__NODE__#$NODE#g" -e "s#__WORKER_DIR__#$WORKER_DIR#g" -e "s#__LOG_DIR_
 plutil -lint "$PLIST" >/dev/null
 
 echo "== (re)loading LaunchAgent"
-launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$PLIST"
+DOMAIN="gui/$(id -u)"
+launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+# bootout is asynchronous; bootstrap fails with EIO if the old job is still unloading.
+for _ in $(seq 1 20); do launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 || break; sleep 0.5; done
+for attempt in 1 2 3; do
+  launchctl bootstrap "$DOMAIN" "$PLIST" && break
+  [ "$attempt" = 3 ] && { echo "launchctl bootstrap failed" >&2; exit 1; }
+  sleep 2
+done
 
 echo "== keeping the Mac awake on power (display sleep unchanged)"
 if sudo -n true 2>/dev/null; then

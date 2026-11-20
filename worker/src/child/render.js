@@ -141,6 +141,14 @@ function failAndExit(err) {
   send({ type: 'error', code: e.code, message: e.message, retryable: e.retryable });
   setTimeout(() => process.exit(1), 100);
 }
+// If the worker dies (crash, kill -9), take Chrome and everything else in our process group with us.
+process.on('disconnect', () => {
+  try {
+    process.kill(-process.pid, 'SIGKILL');
+  } catch {
+    process.exit(1);
+  }
+});
 process.on('uncaughtException', failAndExit);
 process.on('unhandledRejection', failAndExit);
 

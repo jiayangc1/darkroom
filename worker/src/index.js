@@ -75,6 +75,14 @@ export async function start() {
     const tabs = Math.max(1, Math.min(config.maxTabs, Math.floor(free / config.gbPerTab)));
     const r = await runJob(claimed.job, { tabs });
     if (r.cooldown) cooldownUntil = Date.now() + config.pressureCooldownSec * 1000;
+    // Give memory back to the AI models. V8 keeps the heap it grew while moving bundles and videos,
+    // so under launchd (KeepAlive) we simply exit and get a fresh ~60 MB process. Run by hand, we GC.
+    if (process.env.XPC_SERVICE_NAME === 'com.darkroom.worker' && !stopping) {
+      log('[worker] job finished; restarting to release memory');
+      writeStatus({ state: 'restarting' });
+      process.exit(0);
+    }
+    global.gc?.();
   }
   log('[worker] stopped');
   writeStatus({ state: 'stopped' });
