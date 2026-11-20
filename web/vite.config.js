@@ -7,6 +7,6 @@ const api = 'http://localhost:3000';
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
-    proxy: { '/api': api, '/v1': api, '/mcp': api },
+    proxy: { '/api': api, '/v1': api, '/mcp': api, '/SKILL.md': api },
   },
 });

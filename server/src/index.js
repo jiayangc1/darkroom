@@ -12,6 +12,7 @@ import workerRoutes from './routes/worker.js';
 import mcpRouter from './mcp.js';
 import dashboardRoutes, { publicConfig } from './routes/dashboard.js';
 import { clerkWebhook, stripeWebhook } from './routes/inbound-webhooks.js';
+import { skillRoute } from './routes/skill.js';
 import { startSweeper } from './sweeper.js';
 import { rateLimit } from 'express-rate-limit';
 import { receiveUploadByToken } from './jobs/service.js';
@@ -121,6 +122,7 @@ export function createApp() {
   app.use('/v1', publicRoutes);
   app.use('/mcp', mcpRouter);
   app.use('/worker', workerRoutes);
+  app.get(['/SKILL.md', '/skill.md'], skillRoute);
   app.get('/api/public-config', publicConfig);
   app.use('/api', dashboardRoutes);
 
