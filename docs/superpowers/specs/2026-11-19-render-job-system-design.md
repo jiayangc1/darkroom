@@ -134,8 +134,10 @@ plus terminal `failed`, `canceled`, and `expired` (output deleted after retentio
 - `POST /v1/jobs` — multipart: file part `bundle` (`.tar.gz` of the bundle dir)
   + field `job` (JSON: `composition`, `inputProps`, `remotionVersion`, optional
   `frameRange`, `scale`, `codec` (default h264), `crf`, `webhookUrl`).
-  Streams the upload via Busboy straight to Bunny Storage (no full buffering),
-  enforces a max size, then queues. Returns `{ id, status }`.
+  Streams the upload via Busboy to a spool file on the server's disk (never fully
+  buffered in memory), enforces a max size, inspects it, uploads it to Bunny Storage,
+  then queues. Returns `{ id, status }`. (As built; the first draft said "straight to
+  Bunny".)
 - `GET /v1/jobs/:id` — status, progress, error, output URL when done, expiry.
 - `GET /v1/jobs` — the account's jobs, paginated.
 - `DELETE /v1/jobs/:id` — cancel.

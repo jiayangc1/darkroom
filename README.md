@@ -3,6 +3,9 @@
 A render service for AI agents. An agent uploads a finished Remotion bundle; a GPU worker (a Mac
 Studio) renders it; the agent gets back a CDN link to the mp4.
 
+**https://darkroom.jiayangchen.com** — sign up (waitlist + invite codes), make an API key, buy
+prepaid credit, and connect an agent over MCP. `darkroom.lsjc.dev` serves the same app.
+
 ```
 agent ──POST /v1/jobs (bundle.tar.gz)──▶ server (Express + Postgres, Coolify) ──▶ BunnyCDN storage
                                              ▲  │
@@ -15,7 +18,35 @@ agent ──POST /v1/jobs (bundle.tar.gz)──▶ server (Express + Postgres, C
 - `server/` — public API, worker API, job queue (`FOR UPDATE SKIP LOCKED` + leases), sweeper, webhooks.
 - `worker/` — macOS worker: tiny poller + one render process per job.
 - `cli/` — `darkroom submit ./bundle --composition X --out video.mp4`.
-- Design: `docs/superpowers/specs/2026-11-19-render-job-system-design.md`.
+- `web/` — the dashboard (Vite + React SPA, Clerk sign-in), built into the server image.
+- Design: `docs/superpowers/specs/2026-11-19-render-job-system-design.md` (job system) and
+  `docs/superpowers/specs/2026-11-19-paid-service-design.md` (accounts, credits, MCP, dashboard).
+
+## Pricing and plans
+
+Prepaid credit (Stripe Checkout, packs of $10 / $25 / $100, tax added at checkout). A job costs
+`max(15, ceil(seconds)) × $0.0025 × tier`, where tier is 1× up to 1920×1080 pixels (either
+orientation), 2× up to 2560×1440, 4× above. The cost is reserved when the worker reads the
+composition (`video-meta`) and charged when the job is `done`; failed and canceled jobs are free.
+
+| plan | how | limits |
+|---|---|---|
+| `waitlist` | signed up, not let in | can't create keys or render |
+| `trial` | invite code or admin approval; $1.50 once | 1 active job, ≤1920×1080 px, ≤120 s |
+| `paid` | first purchase | defaults (5 active, 600 s, 4K) |
+| `internal` | admin-CLI accounts (the owner) | never charged |
+
+## MCP (agents)
+
+Streamable HTTP, stateless, at `/mcp`, authenticated with the same API key:
+
+```bash
+claude mcp add --transport http darkroom https://darkroom.jiayangchen.com/mcp \
+  --header "Authorization: Bearer dr_live_…"
+```
+
+Tools: `create_upload` → (agent runs the returned `curl`) → `submit_render` → `get_job`;
+plus `list_jobs`, `cancel_job`, `get_balance`.
 
 ## API (agents)
 
@@ -37,9 +68,23 @@ curl -H "Authorization: Bearer $KEY" -F bundle=@bundle.tar.gz \
   --form-string 'job={"composition":"MyComp"}' https://<server>/v1/jobs
 ```
 
+### Upload links (two steps; the upload needs no API key)
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $KEY" https://<server>/v1/uploads
+# → { uploadId, uploadUrl, expiresAt, maxBytes, curl }   (valid 15 min, single use)
+curl -fsS -T bundle.tar.gz '<uploadUrl>'                # → { uploadId, bytes, remotionVersion }
+curl -s -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"uploadId":"…","composition":"MyComp"}' https://<server>/v1/jobs
+```
+
+Unused uploads are deleted after an hour.
+
 ### `GET /v1/jobs/:id`, `GET /v1/jobs?limit=20&before=<createdAt>`, `DELETE /v1/jobs/:id` (cancel)
 
-Job: `{ id, status, progress, stage, composition, remotionVersion, error, outputUrl, video, attempts, createdAt, startedAt, finishedAt, expiresAt }`.
+Job: `{ id, status, progress, stage, composition, remotionVersion, error, outputUrl, video, attempts, createdAt, startedAt, finishedAt, expiresAt, cost, estimatedCost }`
+(costs are USD strings). `GET /v1/jobs/:id` also has `queuePosition` and `worker`
+(`rendering` / `idle` / `paused` with `until` / `offline`).
 Statuses: `uploading → queued → rendering → uploading_output → done`, or `failed` / `canceled` / `expired`
 (outputs are deleted after 7 days).
 
@@ -53,7 +98,9 @@ Renders have **no internet access** except: `fonts.googleapis.com`, `fonts.gstat
 
 `bundle_invalid`, `bundle_too_large`, `version_unsupported`, `composition_not_found`,
 `limits_exceeded` (default: 10 min, 3840×2160), `network_blocked`, `render_error`, `timeout`,
-`worker_lost`, `storage_error`, `too_many_active_jobs`, `rate_limited`, `canceled`.
+`worker_lost`, `storage_error`, `too_many_active_jobs`, `rate_limited`, `canceled`,
+`insufficient_credits` (402), `not_approved` (403, waitlisted), `upload_invalid`, `upload_in_progress`.
+`limits_exceeded` also covers frame rates above 60 fps.
 
 ### Webhooks
 
@@ -69,7 +116,10 @@ const ok = timingSafeEqual(Buffer.from(v1), Buffer.from(createHmac('sha256', sec
 
 ## Server
 
-Env: see `server/.env.example`. Runs migrations on boot. Deploy with `server/Dockerfile`
+Env: see `server/.env.example` (adds Clerk, Stripe, `ADMIN_CLERK_USER_IDS`, `SIGNUP_MODE`, prices).
+Runs migrations on boot. Webhooks it receives: `POST /webhooks/stripe`
+(`checkout.session.completed`, `checkout.session.async_payment_succeeded`) and
+`POST /webhooks/clerk` (`user.deleted`). Deploy with `server/Dockerfile`
 (build context = repo root).
 
 Production: `https://darkroom.lsjc.dev` on Coolify (project "Darkroom", app `darkroom-server`,
@@ -88,6 +138,7 @@ npm run admin -w server -- worker:create mac-studio     # prints worker token on
 T="drw_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"; printf %s "$T" | shasum -a 256
 npm run admin -w server -- worker:register mac-studio <sha256>
 npm run admin -w server -- account:limits <id> '{"maxActiveJobs":10}'
+npm run admin -w server -- account:plan <id> waitlist|trial|paid|internal
 ```
 
 ## Mac worker
