@@ -5,6 +5,7 @@ import { migrate } from './migrate.js';
 import { pool } from './db.js';
 import { HttpError } from './auth.js';
 import publicRoutes from './routes/public.js';
+import workerRoutes from './routes/worker.js';
 
 const STATUS_BY_CODE = {
   bundle_invalid: 400,
@@ -30,6 +31,7 @@ export function createApp() {
   });
 
   app.use('/v1', publicRoutes);
+  app.use('/worker', workerRoutes);
 
   app.use((_req, _res, next) => next(new HttpError(404, 'not_found', 'Not found')));
 
