@@ -69,7 +69,7 @@ router.post('/claim', async (req, res, next) => {
   try {
     if (req.body && typeof req.body === 'object') {
       const caps = { freeMemoryGb: Number(req.body.freeMemoryGb) || null, platform: req.body.platform || null, version: req.body.version || null };
-      pool.query('UPDATE workers SET capabilities = $2 WHERE id = $1', [req.worker.id, caps]).catch(() => {});
+      pool.query(`UPDATE workers SET capabilities = $2, state = 'polling', state_until = NULL, state_at = now() WHERE id = $1`, [req.worker.id, caps]).catch(() => {});
     }
     let gone = false;
     res.on('close', () => {
@@ -94,6 +94,21 @@ router.post('/claim', async (req, res, next) => {
       await sleep(1000);
     }
     if (!gone) res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** A worker that stops polling (paused, waiting for memory) says so, with when it expects to resume. */
+router.post('/status', async (req, res, next) => {
+  try {
+    const until = req.body?.until ? new Date(String(req.body.until)) : null;
+    if (until && Number.isNaN(until.getTime())) throw new HttpError(400, 'bad_request', '"until" must be an ISO date or null');
+    await pool.query(
+      `UPDATE workers SET state = 'paused', state_until = $2, state_at = now() WHERE id = $1`,
+      [req.worker.id, until ? until.toISOString() : null],
+    );
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }

@@ -22,17 +22,25 @@ function inSchedule(d = new Date()) {
   return schedule.find((r) => (r.from <= r.to ? t >= r.from && t < r.to : t >= r.from || t < r.to)) || null;
 }
 
-/** @returns {{ paused: boolean, now: boolean, reason: string|null }} */
+/** When the schedule range `r` (active at `d`) ends: the next occurrence of r.to. */
+function rangeEnd(r, d = new Date()) {
+  const end = new Date(d);
+  end.setHours(Math.floor(r.to / 60), r.to % 60, 0, 0);
+  if (end <= d) end.setDate(end.getDate() + 1);
+  return end.toISOString();
+}
+
+/** @returns {{ paused: boolean, now: boolean, reason: string|null, until: string|null }} */
 export function state() {
   try {
     const p = JSON.parse(readFileSync(pauseFile, 'utf8'));
-    if (p.paused) return { paused: true, now: !!p.now, reason: p.reason || 'paused by command' };
+    if (p.paused) return { paused: true, now: !!p.now, reason: p.reason || 'paused by command', until: null };
   } catch {
     /* no pause file */
   }
   const r = inSchedule();
-  if (r) return { paused: true, now: false, reason: `scheduled pause ${r.text}` };
-  return { paused: false, now: false, reason: null };
+  if (r) return { paused: true, now: false, reason: `scheduled pause ${r.text}`, until: rangeEnd(r) };
+  return { paused: false, now: false, reason: null, until: null };
 }
 
 export function pause({ now = false, reason } = {}) {

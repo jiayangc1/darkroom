@@ -46,6 +46,7 @@ export const progress = (id, progress, stage) => call('POST', `/worker/jobs/${id
 export const videoMeta = (id, meta) => call('POST', `/worker/jobs/${id}/video-meta`, meta);
 export const complete = (id, renderSeconds) => call('POST', `/worker/jobs/${id}/complete`, { renderSeconds });
 export const fail = (id, code, message, retryable) => call('POST', `/worker/jobs/${id}/fail`, { code, message, retryable });
+export const reportStatus = (body) => call('POST', '/worker/status', body, { retries: 0, timeoutMs: 10_000 });
 export const requeue = (id, reason) => call('POST', `/worker/jobs/${id}/requeue`, { reason });
 
 /** Download the job's bundle archive to `dest`. */

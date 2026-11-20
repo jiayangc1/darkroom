@@ -12,6 +12,7 @@ import * as repo from '../jobs/repo.js';
 import {
   parseJob, parseJobObject, reserveJob, getJobFor, listJobsFor, cancelJob, createUpload, submitFromUpload,
 } from '../jobs/service.js';
+import { withLiveStatus } from '../status.js';
 
 const router = Router();
 
@@ -99,7 +100,8 @@ router.post('/uploads', async (req, res, next) => {
 
 router.get('/jobs/:id', async (req, res, next) => {
   try {
-    res.json(repo.toPublic(await getJobFor(req.account.id, req.params.id)));
+    const job = await getJobFor(req.account.id, req.params.id);
+    res.json(await withLiveStatus(repo.toPublic(job), job));
   } catch (err) {
     next(err);
   }

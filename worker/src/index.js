@@ -32,6 +32,13 @@ export async function start() {
   let cooldownUntil = 0;
   let backoff = 0;
   let lastWait = '';
+  let lastReport = 0;
+  // A worker that isn't polling looks offline to the server, so say why (customers see "paused until …").
+  const report = (until, reason) => {
+    if (Date.now() - lastReport < 60_000) return;
+    lastReport = Date.now();
+    api.reportStatus({ state: 'paused', until, reason }).catch(() => {});
+  };
   const waiting = (why) => {
     if (why !== lastWait) log(`[worker] waiting: ${why}`);
     lastWait = why;
@@ -41,6 +48,7 @@ export async function start() {
     const p = pauseState();
     if (p.paused) {
       writeStatus({ state: 'paused', reason: p.reason });
+      report(p.until, p.reason);
       waiting(p.reason);
       await idle(5000);
       continue;
@@ -48,6 +56,7 @@ export async function start() {
     if (Date.now() < cooldownUntil) {
       writeStatus({ state: 'cooldown', until: new Date(cooldownUntil).toISOString() });
       waiting('cooling down after memory pressure');
+      report(new Date(cooldownUntil).toISOString(), 'cooling down after memory pressure');
       await idle(5000);
       continue;
     }
@@ -56,10 +65,12 @@ export async function start() {
     if (free < config.minFreeGb || pressure !== 'normal') {
       writeStatus({ state: 'waiting_memory', freeGb: Number(free.toFixed(1)), pressure });
       waiting(`low memory (${free.toFixed(1)} GB free, pressure ${pressure})`);
+      report(null, 'busy with other work');
       await idle(30_000);
       continue;
     }
     writeStatus({ state: 'idle', freeGb: Number(free.toFixed(1)) });
+    lastReport = 0; // report again promptly on the next pause
     if (lastWait) log('[worker] ready for jobs');
     lastWait = '';
 
