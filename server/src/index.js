@@ -1,5 +1,7 @@
 import express from 'express';
 import { rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import helmet from 'helmet';
 import config from './config.js';
 import { migrate } from './migrate.js';
@@ -28,11 +30,61 @@ const STATUS_BY_CODE = {
   upload_in_progress: 409,
 };
 
+/** The Clerk Frontend API host is encoded in the publishable key (pk_<env>_<base64 host$>). */
+function clerkFrontendApi() {
+  const part = config.clerk.publishableKey.split('_')[2];
+  if (!part) return null;
+  return Buffer.from(part, 'base64').toString('utf8').replace(/\$$/, '');
+}
+
+function cspDirectives() {
+  const fapi = clerkFrontendApi();
+  // Clerk: its Frontend API, plus Clerk Protect (bot protection on sign-up).
+  const clerk = [...(fapi ? [`https://${fapi}`] : []), 'https://*.protect.clerk.com'];
+  return {
+    defaultSrc: ["'self'"],
+    scriptSrc: ["'self'", ...clerk, 'https://challenges.cloudflare.com'],
+    // Clerk Protect probes from per-instance hosts on several ports.
+    connectSrc: ["'self'", ...clerk, 'https://*.client.protect.clerk.com:*', 'https://clerk-telemetry.com'],
+    imgSrc: ["'self'", 'data:', 'https://img.clerk.com'],
+    frameSrc: ["'self'", 'https://challenges.cloudflare.com'],
+    workerSrc: ["'self'", 'blob:'],
+    styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+    fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+    mediaSrc: ["'self'", ...(config.bunny.cdnBase ? [config.bunny.cdnBase] : [])],
+    formAction: ["'self'", 'https://checkout.stripe.com'],
+  };
+}
+
+const API_PREFIX = /^\/(v1|api|mcp|worker|webhooks|healthz)(\/|$)/;
+
+/** Serve the built SPA (web/dist) with an index.html fallback for client-side routes. */
+function serveWebApp(app) {
+  const index = path.join(config.webDist, 'index.html');
+  if (!existsSync(index)) {
+    console.log(`[web] no build at ${config.webDist}; dashboard not served`);
+    return;
+  }
+  app.use(
+    express.static(config.webDist, {
+      index: false,
+      setHeaders: (res, file) => {
+        if (file.includes(`${path.sep}assets${path.sep}`)) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      },
+    }),
+  );
+  app.get('*', (req, res, next) => {
+    if (API_PREFIX.test(req.path)) return next();
+    res.setHeader('Cache-Control', 'no-cache');
+    res.sendFile(index);
+  });
+}
+
 export function createApp() {
   const app = express();
   app.set('trust proxy', config.trustProxy);
   app.disable('x-powered-by');
-  app.use(helmet());
+  app.use(helmet({ contentSecurityPolicy: { directives: cspDirectives() } }));
 
   // Inbound webhooks need the raw body for signature checks, so they come before any JSON parser.
   app.post('/webhooks/clerk', express.raw({ type: 'application/json', limit: '1mb' }), clerkWebhook);
@@ -67,6 +119,8 @@ export function createApp() {
   app.use('/worker', workerRoutes);
   app.get('/api/public-config', publicConfig);
   app.use('/api', dashboardRoutes);
+
+  serveWebApp(app);
 
   app.use((_req, _res, next) => next(new HttpError(404, 'not_found', 'Not found')));
 

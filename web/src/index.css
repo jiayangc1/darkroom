@@ -1,0 +1,69 @@
+@import "tailwindcss";
+
+@theme {
+  --color-room: #170d0b;       /* the darkroom itself */
+  --color-tray: #22130f;       /* raised surfaces */
+  --color-seam: #3b2319;       /* rules and borders */
+  --color-dim: #8f7768;        /* secondary text */
+  --color-paper: #ede3d1;      /* body text, like fiber paper under safelight */
+  --color-safelight: #f0a23b;  /* the one accent */
+  --color-stopbath: #e0573e;   /* failures */
+  --color-fixer: #9cc4a8;      /* finished */
+
+  --font-display: "Big Shoulders Display", "Arial Narrow", sans-serif;
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Martian Mono", ui-monospace, monospace;
+}
+
+@layer base {
+  html { color-scheme: dark; }
+  body {
+    @apply bg-room text-paper font-sans antialiased;
+    font-size: 15px;
+  }
+  :focus-visible { outline: 2px solid var(--color-safelight); outline-offset: 2px; }
+  ::selection { background: var(--color-safelight); color: var(--color-room); }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center gap-2 rounded-md border border-seam px-3 py-1.5 text-sm font-medium
+      hover:border-dim disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply border-safelight bg-safelight text-room hover:brightness-110 hover:border-safelight;
+  }
+  .btn-danger { @apply text-stopbath hover:border-stopbath; }
+  .field {
+    @apply w-full rounded-md border border-seam bg-room px-3 py-2 text-sm text-paper placeholder:text-dim
+      focus:border-safelight focus:outline-none;
+  }
+  .panel { @apply rounded-lg border border-seam bg-tray; }
+  .eyebrow { @apply font-mono text-[11px] uppercase tracking-[0.18em] text-dim; }
+  .h-display { @apply font-display font-extrabold uppercase leading-[0.9] tracking-wide; }
+  .code { @apply font-mono text-[12.5px]; }
+}
+
+/* Film edge: sprocket holes above and below a line of edge print. The one decorative element. */
+.film-edge {
+  position: relative;
+  background: #0d0706;
+  padding: 13px 0;
+  overflow: hidden;
+}
+.film-edge::before, .film-edge::after {
+  content: "";
+  position: absolute; left: 0; right: 0; height: 6px;
+  background-image: linear-gradient(90deg, transparent 0 7px, var(--color-room) 7px 18px, transparent 18px);
+  background-size: 24px 6px;
+  border-radius: 1px;
+}
+.film-edge::before { top: 3px; }
+.film-edge::after { bottom: 3px; }
+
+@keyframes develop { from { opacity: 0; filter: blur(3px) sepia(1); } to { opacity: 1; filter: none; } }
+.develop { animation: develop 700ms ease-out both; }
+@media (prefers-reduced-motion: reduce) {
+  .develop { animation: none; }
+  * { transition: none !important; }
+}
