@@ -1,18 +1,17 @@
 #!/usr/bin/env node
 // Admin CLI: node src/admin.js <command> [...args]
-import { randomUUID, randomBytes } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { pool, query } from './db.js';
 import { migrate } from './migrate.js';
 import { hashToken, newToken } from './auth.js';
+import { createAccount } from './accounts.js';
 
 const commands = {
   async 'account:create'(name) {
     if (!name) throw new Error('usage: account:create <name>');
-    const id = randomUUID();
-    const secret = 'whsec_' + randomBytes(24).toString('base64url');
     // Admin-made accounts are the owner's own (unbilled); change with account:plan.
-    await query("INSERT INTO accounts (id, name, webhook_secret, plan) VALUES ($1, $2, $3, 'internal')", [id, name, secret]);
-    console.log(`account id:      ${id}\nwebhook secret:  ${secret}`);
+    const a = await createAccount(pool, { name, plan: 'internal' });
+    console.log(`account id:      ${a.id}\nwebhook secret:  ${a.webhook_secret}`);
   },
   async 'account:list'() {
     const { rows } = await query('SELECT id, name, plan, balance_micro, limits, created_at FROM accounts ORDER BY created_at');
