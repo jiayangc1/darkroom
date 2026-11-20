@@ -1,7 +1,7 @@
 # Render job system — design
 
 Date: 2026-11-19
-Status: draft, pending owner approval (builder check done)
+Status: approved 2026-11-19
 
 ## Intent
 
@@ -31,6 +31,9 @@ comes after and builds on this one.
 - The Mac is never reachable from the internet.
 - A failed or killed render is retried, never silently lost.
 - Our own renders from this VM go through the same API (small CLI client).
+- **Light on RAM.** The owner also runs local AI models on the Mac, so the
+  worker must use almost no memory when idle and must not starve them while
+  rendering (see "Memory use").
 
 ## Non-goals (this project)
 
@@ -169,8 +172,8 @@ plus terminal `failed`, `canceled`, and `expired` (output deleted after retentio
 6. Upload output, mark complete, **always** delete the temp dir (finally block +
    a startup sweep for leftovers).
 
-One job at a time per worker process, using several Chrome tabs; concurrency is
-a worker config value.
+One job at a time per worker, using several Chrome tabs; tab count follows
+free memory (see "Memory use").
 
 ### Network isolation (customer code)
 
@@ -225,6 +228,29 @@ docs state this rule up front. The same policy applies to Node-side fetches.
 - Bundles deleted once the job reaches a terminal state.
 - Outputs deleted after **7 days** (configurable); job → `expired`.
 - A server-side periodic task handles lease sweeps, expirations, and deletions.
+
+### Memory use
+
+The Mac's unified memory is shared with the owner's local AI models.
+
+- **Idle = one small Node process.** The long-running worker only polls the
+  server; it never imports Remotion and keeps no browser open. Target: well
+  under 100 MB resident while idle.
+- **Each job runs in a child process** that loads the version-specific
+  renderer, launches Chrome, renders, and exits. When it exits, Chrome, the
+  renderer and all render memory are released. Nothing is kept warm between jobs.
+- **Check memory before claiming.** The worker only claims a job when free memory
+  (from macOS `vm_stat` / memory pressure) is above a configured floor. Otherwise
+  it waits and checks again, and the job stays queued for other workers.
+- **Tabs scale to free memory.** Concurrency = min(configured max, free memory ÷
+  per-tab estimate (~2 GB)), at least 1.
+- **Back off under pressure.** While rendering, if macOS memory pressure turns
+  critical, the worker aborts the job and returns it to the queue (not counted
+  as a failed attempt), then waits before claiming again.
+- **Pause switch.** A local command (`render-worker pause` / `resume`) and an
+  optional schedule of hours when the worker doesn't claim jobs, so the owner
+  can free the machine for model work. A pause lets the current job finish
+  unless `--now` is given.
 
 ### Usage recording
 
