@@ -35,14 +35,14 @@ export async function apiKeyAuth(req, _res, next) {
     if (!token || !token.startsWith('dr_live_')) throw new HttpError(401, 'unauthorized', 'Missing or invalid API key');
     const hash = hashToken(token);
     const { rows } = await query(
-      `SELECT k.id AS key_id, a.id, a.limits, a.webhook_secret
+      `SELECT k.id AS key_id, a.id, a.plan, a.limits, a.webhook_secret
          FROM api_keys k JOIN accounts a ON a.id = k.account_id
-        WHERE k.hash = $1 AND k.revoked_at IS NULL`,
+        WHERE k.hash = $1 AND k.revoked_at IS NULL AND a.disabled_at IS NULL`,
       [hash],
     );
     if (!rows[0]) throw new HttpError(401, 'unauthorized', 'Missing or invalid API key');
     const r = rows[0];
-    req.account = { id: r.id, limits: r.limits, keyId: r.key_id };
+    req.account = { id: r.id, plan: r.plan, limits: r.limits, keyId: r.key_id, disabled: false };
     if (shouldTouch(r.key_id)) query('UPDATE api_keys SET last_used_at = now() WHERE id = $1', [r.key_id]).catch(() => {});
     next();
   } catch (err) {

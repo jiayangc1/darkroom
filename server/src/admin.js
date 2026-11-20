@@ -10,16 +10,25 @@ const commands = {
     if (!name) throw new Error('usage: account:create <name>');
     const id = randomUUID();
     const secret = 'whsec_' + randomBytes(24).toString('base64url');
-    await query('INSERT INTO accounts (id, name, webhook_secret) VALUES ($1, $2, $3)', [id, name, secret]);
+    // Admin-made accounts are the owner's own (unbilled); change with account:plan.
+    await query("INSERT INTO accounts (id, name, webhook_secret, plan) VALUES ($1, $2, $3, 'internal')", [id, name, secret]);
     console.log(`account id:      ${id}\nwebhook secret:  ${secret}`);
   },
   async 'account:list'() {
-    const { rows } = await query('SELECT id, name, limits, created_at FROM accounts ORDER BY created_at');
+    const { rows } = await query('SELECT id, name, plan, balance_micro, limits, created_at FROM accounts ORDER BY created_at');
     console.table(rows);
   },
   async 'account:limits'(id, json) {
     if (!id || !json) throw new Error('usage: account:limits <accountId> \'{"maxActiveJobs":10}\'');
     const { rowCount } = await query('UPDATE accounts SET limits = $2::jsonb WHERE id = $1', [id, JSON.stringify(JSON.parse(json))]);
+    if (!rowCount) throw new Error('account not found');
+    console.log('updated');
+  },
+  async 'account:plan'(id, plan) {
+    if (!id || !['waitlist', 'trial', 'paid', 'internal'].includes(plan)) {
+      throw new Error('usage: account:plan <accountId> waitlist|trial|paid|internal');
+    }
+    const { rowCount } = await query('UPDATE accounts SET plan = $2 WHERE id = $1', [id, plan]);
     if (!rowCount) throw new Error('account not found');
     console.log('updated');
   },

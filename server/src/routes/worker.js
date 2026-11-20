@@ -28,9 +28,16 @@ async function ownedJob(req, statuses) {
   return job;
 }
 
+/** Size check that treats portrait and landscape alike, plus a total pixel cap. */
+function fitsSize(w, h, lim) {
+  const long = Math.max(lim.maxWidth, lim.maxHeight);
+  const short = Math.min(lim.maxWidth, lim.maxHeight);
+  return Math.max(w, h) <= long && Math.min(w, h) <= short && w * h <= lim.maxPixels;
+}
+
 async function claimPayload(job) {
-  const { rows } = await pool.query('SELECT limits FROM accounts WHERE id = $1', [job.account_id]);
-  const limits = accountLimits({ limits: rows[0]?.limits });
+  const { rows } = await pool.query('SELECT plan, limits FROM accounts WHERE id = $1', [job.account_id]);
+  const limits = accountLimits(rows[0]);
   return {
     job: {
       id: job.id,
@@ -47,6 +54,8 @@ async function claimPayload(job) {
         maxWidth: limits.maxWidth,
         maxHeight: limits.maxHeight,
         maxRenderMinutes: limits.maxRenderMinutes,
+        maxFps: limits.maxFps,
+        maxPixels: limits.maxPixels,
       },
       egressAllowlist: config.egressAllowlist,
     },
@@ -104,6 +113,7 @@ router.get('/jobs/:id/bundle', async (req, res, next) => {
 
 router.post('/jobs/:id/progress', async (req, res, next) => {
   try {
+    if (!UUID_RE.test(req.params.id)) throw notOwner();
     const p = Number(req.body?.progress);
     const progress = Number.isFinite(p) ? Math.min(Math.max(p, 0), 1) : null;
     const stage = typeof req.body?.stage === 'string' ? req.body.stage.slice(0, 40) : null;
@@ -130,8 +140,10 @@ router.post('/jobs/:id/video-meta', async (req, res, next) => {
     let error = null;
     if (fr && fr[0] >= frames) error = `frameRange starts at ${fr[0]} but the composition has ${frames} frames`;
     else if (renderFrames / fps > lim.maxDurationSec) error = `Video is ${(renderFrames / fps).toFixed(1)} s; the limit is ${lim.maxDurationSec} s`;
-    else if (width * scale > lim.maxWidth || height * scale > lim.maxHeight) {
-      error = `Output ${Math.round(width * scale)}×${Math.round(height * scale)} exceeds ${lim.maxWidth}×${lim.maxHeight}`;
+    else if (fps > lim.maxFps) error = `Frame rate ${fps} exceeds ${lim.maxFps} fps`;
+    else if (!fitsSize(Math.round(width * scale), Math.round(height * scale), lim)) {
+      error = `Output ${Math.round(width * scale)}×${Math.round(height * scale)} exceeds ${lim.maxWidth}×${lim.maxHeight}` +
+        ` (either orientation, at most ${lim.maxPixels} pixels)`;
     }
     const video = { width: Math.round(width * scale), height: Math.round(height * scale), fps, frames: renderFrames };
     if (error) {
