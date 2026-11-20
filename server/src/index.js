@@ -8,6 +8,8 @@ import { HttpError } from './auth.js';
 import publicRoutes from './routes/public.js';
 import workerRoutes from './routes/worker.js';
 import mcpRouter from './mcp.js';
+import dashboardRoutes, { publicConfig } from './routes/dashboard.js';
+import { clerkWebhook, stripeWebhook } from './routes/inbound-webhooks.js';
 import { startSweeper } from './sweeper.js';
 import { rateLimit } from 'express-rate-limit';
 import { receiveUploadByToken } from './jobs/service.js';
@@ -17,6 +19,7 @@ const STATUS_BY_CODE = {
   bundle_too_large: 413,
   version_unsupported: 400,
   url_rejected: 400,
+  billing_unavailable: 503,
   storage_error: 502,
   insufficient_credits: 402,
   not_approved: 403,
@@ -30,6 +33,10 @@ export function createApp() {
   app.set('trust proxy', config.trustProxy);
   app.disable('x-powered-by');
   app.use(helmet());
+
+  // Inbound webhooks need the raw body for signature checks, so they come before any JSON parser.
+  app.post('/webhooks/clerk', express.raw({ type: 'application/json', limit: '1mb' }), clerkWebhook);
+  app.post('/webhooks/stripe', express.raw({ type: 'application/json', limit: '1mb' }), stripeWebhook);
 
   app.get('/healthz', async (_req, res) => {
     try {
@@ -58,6 +65,8 @@ export function createApp() {
   app.use('/v1', publicRoutes);
   app.use('/mcp', mcpRouter);
   app.use('/worker', workerRoutes);
+  app.get('/api/public-config', publicConfig);
+  app.use('/api', dashboardRoutes);
 
   app.use((_req, _res, next) => next(new HttpError(404, 'not_found', 'Not found')));
 
