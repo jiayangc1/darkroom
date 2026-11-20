@@ -1,4 +1,4 @@
-# Render job system — design
+# Darkroom — render job system design
 
 Date: 2026-11-19
 Status: approved 2026-11-19
@@ -8,7 +8,7 @@ Status: approved 2026-11-19
 A paid **render service for AI agents**. An agent has already written a Remotion
 video and bundled it; it uploads the bundle, a GPU machine renders it, and the
 agent gets back a CDN link to the finished mp4. The first worker is the owner's
-M3 Ultra Mac Studio.
+Mac Studio (M4 Max, 14 cores, 36 GB unified memory, macOS 26).
 
 Why: our own Remotion shorts (55gms-ad, doctors-ad, …) render on a CPU-only VM
 with `--gl=swangle` at ~7 s/frame (a 67 s ad took hours). On a real GPU the same
@@ -62,7 +62,7 @@ comes after and builds on this one.
   `file-type`, Helmet, rate limiting, SSRF protection with `ipaddr.js` + a custom
   URL validator. Same conventions as the owner's other projects.
 - Server deploys to the owner's Coolify (Docker). Postgres also on Coolify.
-- Worker runs on macOS (Apple Silicon), as a `launchd` user agent in the owner's login session.
+- Worker runs on macOS 26 (Apple Silicon M4 Max, 36 GB shared with local AI models), as a `launchd` user agent in the owner's login session.
 - No tests written or run unless the owner asks (owner's global rule).
 - Semantic commit messages; commit as progress is made.
 - Remotion licensing: owner must check Remotion's license terms for rendering for
@@ -89,11 +89,11 @@ ever run on the Mac.
 
 ### Repo layout
 
-New repo `~/code/render-service` (monorepo, npm workspaces):
+New repo `~/code/darkroom` (monorepo, npm workspaces):
 
 - `server/` — control server (Express API + Postgres + Bunny client + cleanup jobs)
 - `worker/` — macOS render worker (+ `launchd` plist, setup script)
-- `cli/` — small client: `render submit ./bundle --composition X --props p.json`
+- `cli/` — small client: `darkroom submit ./bundle --composition X --props p.json`
   → uploads, waits, downloads the mp4. Used from our VM for our own videos.
 - `docs/`
 
@@ -247,7 +247,7 @@ The Mac's unified memory is shared with the owner's local AI models.
 - **Back off under pressure.** While rendering, if macOS memory pressure turns
   critical, the worker aborts the job and returns it to the queue (not counted
   as a failed attempt), then waits before claiming again.
-- **Pause switch.** A local command (`render-worker pause` / `resume`) and an
+- **Pause switch.** A local command (`darkroom-worker pause` / `resume`) and an
   optional schedule of hours when the worker doesn't claim jobs, so the owner
   can free the machine for model work. A pause lets the current job finish
   unless `--now` is given.

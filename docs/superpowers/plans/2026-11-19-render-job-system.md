@@ -1,4 +1,4 @@
-# Render Job System Implementation Plan
+# Darkroom Render Job System Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -20,7 +20,7 @@
 - Customer code never runs outside Chrome's sandbox; never pass `--no-sandbox` / `disableWebSecurity`.
 - Internet from renders: allowlist only — default `fonts.googleapis.com, fonts.gstatic.com, cdn.jsdelivr.net, unpkg.com, cdnjs.cloudflare.com` (`EGRESS_ALLOWLIST`). Allowed hosts still must resolve to public IPs.
 - Defaults (all config): bundle ≤ 500 MB compressed, ≤ 2 GB / 20 000 files uncompressed; video ≤ 10 min, ≤ 3840×2160; lease 60 s; claim long-poll 25 s; max 3 attempts; output retention 7 days; render wall-time cap 60 min; 60 req/min per API key; ≤ 5 active (queued+rendering) jobs per account; Remotion ≥ 4.0.0.
-- Worker memory: idle < 100 MB RSS; claim only if free memory ≥ `MIN_FREE_GB` (default 8); tabs = clamp(floor(freeGB / 2), 1, `MAX_TABS` default 8); abort + requeue (no attempt counted) on critical memory pressure.
+- Worker memory: idle < 100 MB RSS; claim only if free memory ≥ `MIN_FREE_GB` (default 8); tabs = clamp(floor(freeGB / 2), 1, `MAX_TABS` default 4); abort + requeue (no attempt counted) on critical memory pressure.
 
 ## Review Focus
 
@@ -70,12 +70,12 @@ worker/
   src/child/proxy.js         HTTP/CONNECT filtering proxy
   src/child/node-guard.js    --import preload; guards Node sockets
   src/child/chrome-wrapper.js writes per-job wrapper script
-  bin/render-worker.js       CLI: start | pause [--now] | resume | status
-  macos/com.renderservice.worker.plist
+  bin/darkroom-worker.js       CLI: start | pause [--now] | resume | status
+  macos/com.darkroom.worker.plist
   macos/setup.sh
 cli/
   package.json
-  bin/render.js              submit | status | cancel
+  bin/darkroom.js              submit | status | cancel
 ```
 
 ---
@@ -87,7 +87,7 @@ cli/
 **Interfaces — Produces:**
 - `config` (default export): `{ port, databaseUrl, publicBaseUrl, bunny: {storageZone, accessKey, region, cdnBase}, limits: {...Global defaults}, egressAllowlist: string[] }`
 - `pool`, `tx(async (client) => T): Promise<T>` from `db.js`
-- `hashToken(token: string): string` (sha256 hex), `newToken(prefix: 'rk_live_'|'rw_'): string` (prefix + 32 random bytes base64url)
+- `hashToken(token: string): string` (sha256 hex), `newToken(prefix: 'dr_live_'|'drw_'): string` (prefix + 32 random bytes base64url)
 - `apiKeyAuth` → sets `req.account = {id, limits}`; `workerAuth` → sets `req.worker = {id, name}`; both update `last_used_at`/`last_seen_at` at most once a minute.
 
 - [ ] **Step 1:** Root workspaces + ESLint 9 flat config (recommended rules, node globals); `npm run lint` at root.
@@ -153,7 +153,7 @@ cli/
 **Interfaces — Produces:** `startSweeper(): () => void` (stop fn), runs every 15 s, each pass guarded by `pg_try_advisory_lock(4242)` so multiple server instances don't double-run.
 
 - [ ] **Step 1:** Sweep steps: (a) `rendering|uploading_output` with `lease_expires_at < now()` → `queued` if attempts < 3 else `failed: worker_lost`; (b) terminal jobs with a bundle path → `bunny.delete`, null the path; (c) `done` with `expires_at < now()` → delete output, status `expired`; (d) enqueue a `webhook_deliveries` row when a job with `webhook_url` becomes terminal; deliver due rows.
-- [ ] **Step 2:** `webhooks.js`: body = job JSON + `event: 'job.done'|'job.failed'|'job.canceled'`; header `Render-Signature: t=<unix>,v1=<hex HMAC-SHA256(secret, `${t}.${body}`)>`; re-run `assertPublicUrl` before each send; 10 s timeout; no redirects followed; retries at 1, 5, 30, 120 min then give up.
+- [ ] **Step 2:** `webhooks.js`: body = job JSON + `event: 'job.done'|'job.failed'|'job.canceled'`; header `Darkroom-Signature: t=<unix>,v1=<hex HMAC-SHA256(secret, `${t}.${body}`)>`; re-run `assertPublicUrl` before each send; 10 s timeout; no redirects followed; retries at 1, 5, 30, 120 min then give up.
 - [ ] **Step 3:** Dockerfile (node:22-slim, `npm ci --omit=dev -w server`, `CMD node src/index.js`), `.env.example` complete.
 - [ ] **Step 4:** Verify: lint; `docker build` succeeds.
 - [ ] **Step 5:** Commit `feat(server): sweeper, signed webhooks, Dockerfile`.
@@ -161,21 +161,21 @@ cli/
 
 ### Task 6: Worker process (poller, memory, pause, job runner)
 
-**Files:** Create `worker/package.json`, `worker/.env.example`, `worker/src/{index,config,api,memory,pause,run-job}.js`, `worker/bin/render-worker.js`.
+**Files:** Create `worker/package.json`, `worker/.env.example`, `worker/src/{index,config,api,memory,pause,run-job}.js`, `worker/bin/darkroom-worker.js`.
 
 **Interfaces:**
 - Consumes: Task 4 HTTP API.
 - Produces:
   - `memory.freeGb(): Promise<number>` — parse `vm_stat`: (free + inactive + purgeable + speculative pages) × page size.
   - `memory.pressureLevel(): Promise<'normal'|'warn'|'critical'>` — `sysctl -n kern.memorystatus_vm_pressure_level` (1/2/4).
-  - `pause.state(): {paused: boolean, now: boolean, reason}` — reads `~/Library/Application Support/render-worker/pause.json` and `PAUSE_SCHEDULE` (e.g. `09:00-18:00` local, comma-separated ranges).
+  - `pause.state(): {paused: boolean, now: boolean, reason}` — reads `~/Library/Application Support/darkroom-worker/pause.json` and `PAUSE_SCHEDULE` (e.g. `09:00-18:00` local, comma-separated ranges).
   - `runJob(job, {tabs}): Promise<void>` — full lifecycle, below.
   - Child IPC messages: child→parent `{type:'progress', progress, stage}`, `{type:'meta', width,height,fps,frames}`, `{type:'done', file}`, `{type:'error', code, message, retryable}`; parent→child `{type:'meta-ok'}` | `{type:'meta-reject', error}`.
 
 - [ ] **Step 1:** `index.js` loop: on start, delete everything under `WORK_DIR` (leftover job dirs). Loop: if paused → sleep 30 s; if `freeGb() < MIN_FREE_GB` or pressure ≠ normal → sleep 30 s; else `claim`. Must not import anything from `child/` or Remotion (keeps idle RSS low).
 - [ ] **Step 2:** `run-job.js`: mkdir `WORK_DIR/<jobId>`; download bundle; `extract` (Task 7); `ensureRenderer(version)` (Task 7); spawn `node --import <node-guard.js> child/render.js` with `detached: true`, `serialization: 'advanced'`, env carrying job JSON path, renderer dir, tabs. Every 2 s: send progress (cancel → kill), check `pressureLevel()` (critical → kill, `requeue`), check pause `now` (→ kill, `requeue`), check 60-min cap (→ kill, `fail timeout` non-retryable). Kill = `process.kill(-child.pid, 'SIGKILL')`. On `done`: `PUT output` with retries (3, backoff 2/10/30 s), then `complete`. On 409 from any call: kill and discard. `finally`: `rm -rf` the job dir.
 - [ ] **Step 3:** `api.js`: fetch with `Authorization: Bearer <WORKER_TOKEN>`, retries with backoff on network errors/5xx for idempotent calls (claim, progress, complete, fail, requeue).
-- [ ] **Step 4:** `bin/render-worker.js`: `start` (runs index), `pause [--now] [--reason]`, `resume`, `status` (prints pause state, free memory, pressure, current job from a `status.json` the loop writes).
+- [ ] **Step 4:** `bin/darkroom-worker.js`: `start` (runs index), `pause [--now] [--reason]`, `resume`, `status` (prints pause state, free memory, pressure, current job from a `status.json` the loop writes).
 - [ ] **Step 5:** Verify: lint; on this VM, `node --check` all files.
 - [ ] **Step 6:** Commit `feat(worker): poll loop, memory gate, pause control, job runner`.
 
@@ -185,7 +185,7 @@ cli/
 
 **Interfaces — Produces:**
 - `extract(archive: string, destDir: string, limits): Promise<string>` → returns bundle root dir (the dir containing `index.html`). Same rules as server `inspectBundle` (types, `..`, absolute, caps), plus: resolve each target with `path.resolve(destDir, name)` and require it to stay inside `destDir`; create files with mode `0o644`, dirs `0o755`, ignore archive modes/owners.
-- `ensureRenderer(version: string): Promise<string>` → dir containing `node_modules/@remotion/renderer`. Cache at `RENDERER_CACHE` (default `~/Library/Application Support/render-worker/remotion/<version>`); install with `npm install --no-save --ignore-scripts --no-audit --no-fund @remotion/renderer@<version> remotion@<version>` into a temp dir then rename (atomic); a per-version lock file prevents two concurrent installs. Version must match `/^\d+\.\d+\.\d+$/` before it touches a command line.
+- `ensureRenderer(version: string): Promise<string>` → dir containing `node_modules/@remotion/renderer`. Cache at `RENDERER_CACHE` (default `~/Library/Application Support/darkroom-worker/remotion/<version>`); install with `npm install --no-save --ignore-scripts --no-audit --no-fund @remotion/renderer@<version> remotion@<version>` into a temp dir then rename (atomic); a per-version lock file prevents two concurrent installs. Version must match `/^\d+\.\d+\.\d+$/` before it touches a command line.
 
 - [ ] **Step 1:** Implement both.
 - [ ] **Step 2:** Verify: lint; on this VM extract the 55gms-ad button bundle tarball and confirm root contains `index.html`; craft a tar with a `../x` entry and a symlink and confirm both throw `bundle_invalid`.
@@ -208,12 +208,12 @@ cli/
 
 ### Task 9: macOS install, launchd, CLI client
 
-**Files:** Create `worker/macos/com.renderservice.worker.plist`, `worker/macos/setup.sh`, `cli/package.json`, `cli/bin/render.js`, root `README.md`.
+**Files:** Create `worker/macos/com.darkroom.worker.plist`, `worker/macos/setup.sh`, `cli/package.json`, `cli/bin/darkroom.js`, root `README.md`.
 
-**Interfaces — Produces:** `render submit <bundleDir> --composition <id> [--props file.json] [--out video.mp4] [--scale n] [--frames a-b]` (tars the dir to a temp file, POSTs, polls every 3 s printing progress, downloads to `--out`); `render status <id>`; `render cancel <id>`. Env: `RENDER_API_URL`, `RENDER_API_KEY`.
+**Interfaces — Produces:** `darkroom submit <bundleDir> --composition <id> [--props file.json] [--out video.mp4] [--scale n] [--frames a-b]` (tars the dir to a temp file, POSTs, polls every 3 s printing progress, downloads to `--out`); `darkroom status <id>`; `darkroom cancel <id>`. Env: `DARKROOM_API_URL`, `DARKROOM_API_KEY`.
 
-- [ ] **Step 1:** plist: user LaunchAgent (`~/Library/LaunchAgents`), `RunAtLoad`, `KeepAlive`, `ProcessType` = `Background` is **not** used (it may deprioritize GPU) — use `Standard`; stdout/stderr to `~/Library/Logs/render-worker/worker.log`; worker rotates the log itself at 20 MB keeping 3 files.
-- [ ] **Step 2:** `setup.sh`: checks Node ≥ 22, `npm ci -w worker`, copies `.env` template if missing, installs/reloads plist with `launchctl bootout/bootstrap gui/$UID`, runs `sudo pmset -c sleep 0 disksleep 0` (display sleep untouched), prints `render-worker status`.
+- [ ] **Step 1:** plist: user LaunchAgent (`~/Library/LaunchAgents`), `RunAtLoad`, `KeepAlive`, `ProcessType` = `Background` is **not** used (it may deprioritize GPU) — use `Standard`; stdout/stderr to `~/Library/Logs/darkroom-worker/worker.log`; worker rotates the log itself at 20 MB keeping 3 files.
+- [ ] **Step 2:** `setup.sh`: checks Node ≥ 22, `npm ci -w worker`, copies `.env` template if missing, installs/reloads plist with `launchctl bootout/bootstrap gui/$UID`, runs `sudo pmset -c sleep 0 disksleep 0` (display sleep untouched), prints `darkroom-worker status`.
 - [ ] **Step 3:** README: architecture, env vars for both packages, API reference (request/response/error codes, webhook signature verification snippet, the allowlist rule), admin commands, Mac setup.
 - [ ] **Step 4:** Verify: lint; `plutil -lint` on the Mac (Task 10).
 - [ ] **Step 5:** Commit `feat: macOS launchd setup, CLI client, README`.
@@ -226,5 +226,5 @@ Not automated tests — one-time manual checks the spec requires. Needs either S
 - [ ] **Step 2: Hostile bundle.** Build a small Remotion bundle whose composition, via `fetch`, `<Img>`, `<OffthreadVideo>`, WebSocket and WebRTC, tries: `http://192.168.1.1`, `http://10.0.0.1`, `http://127.0.0.1:11434` (Ollama), `http://localhost:<servePort+1>`, `http://169.254.169.254`, a public non-allowlisted host, and a DNS name resolving to a private IP. Pass: the job fails `network_blocked` and the proxy/guard logs show every attempt denied; a control bundle loading Google Fonts renders fine.
 - [ ] **Step 3: Memory check.** `ps -o rss` of the idle worker < 100 MB; during a render the child is the only large process; after it finishes, RSS returns to idle and no Chrome processes remain. With `MIN_FREE_GB` set above current free memory, the worker does not claim.
 - [ ] **Step 4: Recovery check.** `kill -9` the worker mid-render → job returns to `queued` after the lease, re-renders on restart; leftover job dir is removed at startup.
-- [ ] **Step 5: End to end.** From this VM: `render submit ~/code/55gms-ad/out/button/bundle --composition ButtonAd --out out.mp4` → mp4 downloads; audio is muxed by us afterwards as today.
+- [ ] **Step 5: End to end.** From this VM: `darkroom submit ~/code/55gms-ad/out/button/bundle --composition ButtonAd --out out.mp4` → mp4 downloads; audio is muxed by us afterwards as today.
 - [ ] **Step 6:** Commit any fixes as `fix(worker): …`; note measured timings in README.
